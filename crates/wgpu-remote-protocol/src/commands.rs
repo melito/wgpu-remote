@@ -13,10 +13,12 @@
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
-use wgpu_types::{BufferAddress, DynamicOffset, Extent3d, Origin3d, TextureAspect};
+use wgpu_types::{
+    BufferAddress, Color, DynamicOffset, Extent3d, Operations, Origin3d, TextureAspect,
+};
 
 use crate::ids::{
-    BindGroupId, BufferId, ComputePipelineId, RenderPipelineId, TextureId,
+    BindGroupId, BufferId, ComputePipelineId, RenderPipelineId, TextureId, TextureViewId,
 };
 
 /// One recorded command buffer. Encoded into the `Bytes` payload of
@@ -71,12 +73,27 @@ pub enum EncoderCommand {
         label: Option<String>,
         commands: Vec<ComputeCommand>,
     },
-    /// Stub — render-pass replay lands in the next iteration.
     BeginRenderPass {
         label: Option<String>,
-        // TODO: color attachments, depth-stencil, occlusion query set
+        color_attachments: Vec<Option<RenderPassColorAttachment>>,
+        depth_stencil_attachment: Option<RenderPassDepthStencilAttachment>,
         commands: Vec<RenderCommand>,
     },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RenderPassColorAttachment {
+    pub view: TextureViewId,
+    pub depth_slice: Option<u32>,
+    pub resolve_target: Option<TextureViewId>,
+    pub ops: Operations<Color>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RenderPassDepthStencilAttachment {
+    pub view: TextureViewId,
+    pub depth_ops: Option<Operations<f32>>,
+    pub stencil_ops: Option<Operations<u32>>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

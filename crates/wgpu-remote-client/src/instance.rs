@@ -16,7 +16,8 @@ use wgpu_remote_protocol::{
     Action, Response,
     descriptors::{
         BindGroupDescriptor, BindGroupLayoutDescriptor, BufferDescriptor,
-        ComputePipelineDescriptor, PipelineLayoutDescriptor, ShaderModuleDescriptor,
+        ComputePipelineDescriptor, PipelineLayoutDescriptor, RenderPipelineDescriptor,
+        SamplerDescriptor, ShaderModuleDescriptor, TextureDescriptor,
     },
 };
 use wgpu_remote_transport::Connection;
@@ -26,7 +27,8 @@ use crate::{
     encoder::CommandEncoder,
     ids::IdMinter,
     resources::{
-        BindGroup, BindGroupLayout, Buffer, ComputePipeline, PipelineLayout, ShaderModule,
+        BindGroup, BindGroupLayout, Buffer, ComputePipeline, PipelineLayout, RenderPipeline,
+        Sampler, ShaderModule, Texture,
     },
 };
 
@@ -95,7 +97,7 @@ impl<C: Connection + Clone + 'static> Adapter<C> {
         }
         let inner = Arc::new(DeviceInner {
             client: Arc::clone(&self.client),
-            ids: IdMinter::new(),
+            ids: Arc::new(IdMinter::new()),
         });
         Ok((
             Device {
@@ -107,10 +109,12 @@ impl<C: Connection + Clone + 'static> Adapter<C> {
 }
 
 /// Shared state for `Device` + `Queue`. Both need the client and to mint IDs;
-/// neither is more authoritative than the other.
+/// neither is more authoritative than the other. The `IdMinter` is `Arc`'d
+/// so resource handles that need to mint child IDs (e.g. `Texture::create_view`)
+/// can clone it without going through the device.
 pub(crate) struct DeviceInner<C: Connection + Clone + 'static> {
     pub(crate) client: Arc<Client<C>>,
-    pub(crate) ids: IdMinter,
+    pub(crate) ids: Arc<IdMinter>,
 }
 
 pub struct Device<C: Connection + Clone + 'static> {
@@ -199,6 +203,55 @@ impl<C: Connection + Clone + 'static> Device<C> {
             .request(Action::CreateComputePipeline { id, desc })
             .await?)?;
         Ok(ComputePipeline::new(id, Arc::clone(&self.inner.client)))
+    }
+
+    pub async fn create_render_pipeline(
+        &self,
+        desc: RenderPipelineDescriptor,
+    ) -> Result<RenderPipeline<C>, ClientError> {
+        let id = self.inner.ids.mint_render_pipeline();
+        ok(self
+            .inner
+            .client
+            .request(Action::CreateRenderPipeline { id, desc })
+            .await?)?;
+        Ok(RenderPipeline::new(id, Arc::clone(&self.inner.client)))
+    }
+
+    pub async fn create_texture(
+        &self,
+        desc: &TextureDescriptor,
+    ) -> Result<Texture<C>, ClientError> {
+        let id = self.inner.ids.mint_texture();
+        ok(self
+            .inner
+            .client
+            .request(Action::CreateTexture {
+                id,
+                desc: desc.clone(),
+            })
+            .await?)?;
+        Ok(Texture::new(
+            id,
+            Arc::clone(&self.inner.client),
+            Arc::clone(&self.inner.ids),
+        ))
+    }
+
+    pub async fn create_sampler(
+        &self,
+        desc: &SamplerDescriptor,
+    ) -> Result<Sampler<C>, ClientError> {
+        let id = self.inner.ids.mint_sampler();
+        ok(self
+            .inner
+            .client
+            .request(Action::CreateSampler {
+                id,
+                desc: desc.clone(),
+            })
+            .await?)?;
+        Ok(Sampler::new(id, Arc::clone(&self.inner.client)))
     }
 
     pub fn create_command_encoder(&self, label: Option<String>) -> CommandEncoder<C> {

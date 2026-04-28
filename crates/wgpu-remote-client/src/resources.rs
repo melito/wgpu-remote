@@ -16,14 +16,15 @@ use std::sync::Arc;
 use bytes::Bytes;
 use wgpu_remote_protocol::{
     Action, Response,
+    descriptors::TextureViewDescriptor,
     ids::{
         BindGroupId, BindGroupLayoutId, BufferId, ComputePipelineId, PipelineLayoutId,
-        ResourceId, ShaderModuleId,
+        RenderPipelineId, ResourceId, SamplerId, ShaderModuleId, TextureId, TextureViewId,
     },
 };
 use wgpu_remote_transport::Connection;
 
-use crate::{Client, ClientError};
+use crate::{Client, ClientError, ids::IdMinter};
 
 /// Spawns the destroy action without waiting for the response. Failures are
 /// logged but never propagated — drop is infallible.
@@ -186,3 +187,72 @@ resource!(BindGroupLayout, BindGroupLayoutInner, BindGroupLayoutId, BindGroupLay
 resource!(BindGroup, BindGroupInner, BindGroupId, BindGroup);
 resource!(PipelineLayout, PipelineLayoutInner, PipelineLayoutId, PipelineLayout);
 resource!(ComputePipeline, ComputePipelineInner, ComputePipelineId, ComputePipeline);
+resource!(Sampler, SamplerInner, SamplerId, Sampler);
+resource!(TextureView, TextureViewInner, TextureViewId, TextureView);
+resource!(RenderPipeline, RenderPipelineInner, RenderPipelineId, RenderPipeline);
+
+// Texture is hand-written because it needs `create_view`, which must mint a
+// new TextureViewId via the shared `IdMinter` and ship a CreateTextureView
+// action. The macro doesn't know about IdMinter or the parent device.
+
+pub struct Texture<C: Connection + Clone + 'static> {
+    inner: Arc<TextureInner<C>>,
+}
+
+struct TextureInner<C: Connection + Clone + 'static> {
+    id: TextureId,
+    client: Arc<Client<C>>,
+    ids: Arc<IdMinter>,
+}
+
+impl<C: Connection + Clone + 'static> Texture<C> {
+    pub(crate) fn new(id: TextureId, client: Arc<Client<C>>, ids: Arc<IdMinter>) -> Self {
+        Self {
+            inner: Arc::new(TextureInner { id, client, ids }),
+        }
+    }
+
+    pub fn id(&self) -> TextureId {
+        self.inner.id
+    }
+
+    /// Create a view onto this texture. Awaits the server's Ok before
+    /// returning — same race-avoidance reasoning as `create_buffer`.
+    pub async fn create_view(
+        &self,
+        desc: TextureViewDescriptor,
+    ) -> Result<TextureView<C>, ClientError> {
+        let view_id = self.inner.ids.mint_texture_view();
+        let response = self
+            .inner
+            .client
+            .request(Action::CreateTextureView {
+                id: view_id,
+                texture: self.inner.id,
+                desc,
+            })
+            .await?;
+        match response {
+            Response::Ok => Ok(TextureView::new(view_id, Arc::clone(&self.inner.client))),
+            Response::Error { code, message } => Err(ClientError::ServerError(code, message)),
+            other => Err(ClientError::ServerError(
+                wgpu_remote_protocol::responses::ErrorCode::Internal,
+                format!("expected Ok, got {other:?}"),
+            )),
+        }
+    }
+}
+
+impl<C: Connection + Clone + 'static> Clone for Texture<C> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<C: Connection + Clone + 'static> Drop for TextureInner<C> {
+    fn drop(&mut self) {
+        spawn_destroy(Arc::clone(&self.client), ResourceId::Texture(self.id));
+    }
+}

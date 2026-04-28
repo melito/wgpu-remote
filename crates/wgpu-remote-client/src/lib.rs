@@ -17,10 +17,14 @@ pub mod instance;
 pub mod resources;
 
 pub use client::{Client, ClientError};
-pub use encoder::{CommandBuffer, CommandEncoder, ComputePass};
+pub use encoder::{
+    ColorAttachment, CommandBuffer, CommandEncoder, ComputePass, DepthStencilAttachment,
+    RenderPass, RenderPassDescriptor,
+};
 pub use instance::{Adapter, Device, Instance, Queue};
 pub use resources::{
-    BindGroup, BindGroupLayout, Buffer, ComputePipeline, PipelineLayout, ShaderModule,
+    BindGroup, BindGroupLayout, Buffer, ComputePipeline, PipelineLayout, RenderPipeline, Sampler,
+    ShaderModule, Texture, TextureView,
 };
 
 // Re-export the protocol types users will pass into descriptors.
