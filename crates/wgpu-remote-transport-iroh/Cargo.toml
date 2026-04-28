@@ -1,0 +1,17 @@
+[package]
+name = "wgpu-remote-transport-iroh"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "iroh transport adapter for wgpu-remote (NAT-traversed QUIC)."
+
+[dependencies]
+wgpu-remote-transport.workspace = true
+tokio.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+# iroh added when this adapter is implemented; kept out of the dep graph until then
+# to avoid pulling in iroh-quinn for users who only want raw QUIC.

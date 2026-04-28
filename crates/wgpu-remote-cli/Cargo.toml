@@ -1,0 +1,21 @@
+[package]
+name = "wgpu-remote-cli"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Demo / smoke-test client for wgpu-remote-server."
+
+[[bin]]
+name = "wgpu-remote-cli"
+path = "src/main.rs"
+
+[dependencies]
+wgpu-remote-protocol.workspace = true
+wgpu-remote-transport.workspace = true
+wgpu-remote-client.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+bytes.workspace = true
+anyhow.workspace = true
+rustls.workspace = true

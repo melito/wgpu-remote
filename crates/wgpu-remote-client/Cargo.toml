@@ -1,0 +1,18 @@
+[package]
+name = "wgpu-remote-client"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Client facade that exposes wgpu::Instance backed by a remote GPU."
+
+[dependencies]
+wgpu-remote-protocol.workspace = true
+wgpu-remote-transport.workspace = true
+wgpu.workspace = true
+wgpu-types.workspace = true
+tokio.workspace = true
+bytes.workspace = true
+bincode.workspace = true
+thiserror.workspace = true

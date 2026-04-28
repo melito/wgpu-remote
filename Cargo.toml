@@ -1,0 +1,49 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/wgpu-remote-protocol",
+    "crates/wgpu-remote-transport",
+    "crates/wgpu-remote-transport-iroh",
+    "crates/wgpu-remote-client",
+    "crates/wgpu-remote-cli",
+    "crates/wgpu-remote-server",
+    "crates/wgpu-remote-tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/melgray/wgpu-remote"
+
+[workspace.dependencies]
+# Internal
+wgpu-remote-protocol = { path = "crates/wgpu-remote-protocol" }
+wgpu-remote-transport = { path = "crates/wgpu-remote-transport" }
+wgpu-remote-transport-iroh = { path = "crates/wgpu-remote-transport-iroh" }
+wgpu-remote-client = { path = "crates/wgpu-remote-client" }
+wgpu-remote-cli = { path = "crates/wgpu-remote-cli" }
+wgpu-remote-server = { path = "crates/wgpu-remote-server" }
+
+# Pin wgpu — client and server MUST agree on this exact version
+wgpu = "27"
+wgpu-types = { version = "27", features = ["serde"] }
+
+# Wire format
+bincode = { version = "2", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+bytes = { version = "1", features = ["serde"] }
+
+# Async + transport
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-util", "sync"] }
+futures-util = "0.3"
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
+
+# Errors
+thiserror = "2"
+
+# Tests / dev
+anyhow = "1"

@@ -1,0 +1,20 @@
+[package]
+name = "wgpu-remote-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "End-to-end tests for wgpu-remote, including an in-memory transport."
+publish = false
+
+[dependencies]
+wgpu-remote-protocol.workspace = true
+wgpu-remote-transport.workspace = true
+wgpu-remote-client.workspace = true
+wgpu-remote-server.workspace = true
+tokio = { workspace = true, features = ["time"] }
+anyhow.workspace = true
+bytes.workspace = true
+wgpu-types.workspace = true
+rustls.workspace = true

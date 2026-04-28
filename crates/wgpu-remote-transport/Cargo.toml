@@ -1,0 +1,21 @@
+[package]
+name = "wgpu-remote-transport"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pluggable transport abstraction for wgpu-remote, with a quinn-based QUIC implementation."
+
+[features]
+default = ["quic"]
+quic = ["dep:quinn", "dep:rustls", "dep:rcgen"]
+
+[dependencies]
+tokio.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
+thiserror.workspace = true
+quinn = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
