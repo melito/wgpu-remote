@@ -122,136 +122,97 @@ pub struct Device<C: Connection + Clone + 'static> {
 }
 
 impl<C: Connection + Clone + 'static> Device<C> {
-    /// Create a buffer. Async because v1 uses one stream per request, so
-    /// follow-up actions that reference this buffer's ID could race the
-    /// create on the server side. Awaiting the Ok here keeps the resource
-    /// table populated before the user can use the handle. v1.1 will let us
-    /// switch to fire-and-forget once the server multiplexes actions onto a
-    /// single ordered stream per connection.
-    pub async fn create_buffer(
-        &self,
-        desc: &BufferDescriptor,
-    ) -> Result<Buffer<C>, ClientError> {
+    // All `create_*` methods are sync. They mint an ID locally, ship the
+    // creation Action via `Client::send` (fire-and-forget), and return the
+    // typed handle. The multiplexed stream guarantees the server processes
+    // creates before any subsequent reference to the ID — so the handle is
+    // immediately usable in follow-up actions even though we didn't wait
+    // for an Ok.
+    //
+    // Creation failures (validation errors, OOM) surface later as
+    // `UnknownResource` on the next reference. Use `Client::request` with
+    // a hand-built Action if you need explicit error handling.
+
+    pub fn create_buffer(&self, desc: &BufferDescriptor) -> Buffer<C> {
         let id = self.inner.ids.mint_buffer();
-        ok(self
-            .inner
-            .client
-            .request(Action::CreateBuffer {
-                id,
-                desc: desc.clone(),
-            })
-            .await?)?;
-        Ok(Buffer::new(id, desc.size, Arc::clone(&self.inner.client)))
+        self.inner.client.send(Action::CreateBuffer {
+            id,
+            desc: desc.clone(),
+        });
+        Buffer::new(id, desc.size, Arc::clone(&self.inner.client))
     }
 
-    pub async fn create_shader_module(
-        &self,
-        desc: ShaderModuleDescriptor,
-    ) -> Result<ShaderModule<C>, ClientError> {
+    pub fn create_shader_module(&self, desc: ShaderModuleDescriptor) -> ShaderModule<C> {
         let id = self.inner.ids.mint_shader_module();
-        ok(self.inner.client.request(Action::CreateShaderModule { id, desc }).await?)?;
-        Ok(ShaderModule::new(id, Arc::clone(&self.inner.client)))
+        self.inner
+            .client
+            .send(Action::CreateShaderModule { id, desc });
+        ShaderModule::new(id, Arc::clone(&self.inner.client))
     }
 
-    pub async fn create_bind_group_layout(
+    pub fn create_bind_group_layout(
         &self,
         desc: BindGroupLayoutDescriptor,
-    ) -> Result<BindGroupLayout<C>, ClientError> {
+    ) -> BindGroupLayout<C> {
         let id = self.inner.ids.mint_bind_group_layout();
-        ok(self
-            .inner
+        self.inner
             .client
-            .request(Action::CreateBindGroupLayout { id, desc })
-            .await?)?;
-        Ok(BindGroupLayout::new(id, Arc::clone(&self.inner.client)))
+            .send(Action::CreateBindGroupLayout { id, desc });
+        BindGroupLayout::new(id, Arc::clone(&self.inner.client))
     }
 
-    pub async fn create_bind_group(
-        &self,
-        desc: BindGroupDescriptor,
-    ) -> Result<BindGroup<C>, ClientError> {
+    pub fn create_bind_group(&self, desc: BindGroupDescriptor) -> BindGroup<C> {
         let id = self.inner.ids.mint_bind_group();
-        ok(self
-            .inner
+        self.inner
             .client
-            .request(Action::CreateBindGroup { id, desc })
-            .await?)?;
-        Ok(BindGroup::new(id, Arc::clone(&self.inner.client)))
+            .send(Action::CreateBindGroup { id, desc });
+        BindGroup::new(id, Arc::clone(&self.inner.client))
     }
 
-    pub async fn create_pipeline_layout(
-        &self,
-        desc: PipelineLayoutDescriptor,
-    ) -> Result<PipelineLayout<C>, ClientError> {
+    pub fn create_pipeline_layout(&self, desc: PipelineLayoutDescriptor) -> PipelineLayout<C> {
         let id = self.inner.ids.mint_pipeline_layout();
-        ok(self
-            .inner
+        self.inner
             .client
-            .request(Action::CreatePipelineLayout { id, desc })
-            .await?)?;
-        Ok(PipelineLayout::new(id, Arc::clone(&self.inner.client)))
+            .send(Action::CreatePipelineLayout { id, desc });
+        PipelineLayout::new(id, Arc::clone(&self.inner.client))
     }
 
-    pub async fn create_compute_pipeline(
-        &self,
-        desc: ComputePipelineDescriptor,
-    ) -> Result<ComputePipeline<C>, ClientError> {
+    pub fn create_compute_pipeline(&self, desc: ComputePipelineDescriptor) -> ComputePipeline<C> {
         let id = self.inner.ids.mint_compute_pipeline();
-        ok(self
-            .inner
+        self.inner
             .client
-            .request(Action::CreateComputePipeline { id, desc })
-            .await?)?;
-        Ok(ComputePipeline::new(id, Arc::clone(&self.inner.client)))
+            .send(Action::CreateComputePipeline { id, desc });
+        ComputePipeline::new(id, Arc::clone(&self.inner.client))
     }
 
-    pub async fn create_render_pipeline(
-        &self,
-        desc: RenderPipelineDescriptor,
-    ) -> Result<RenderPipeline<C>, ClientError> {
+    pub fn create_render_pipeline(&self, desc: RenderPipelineDescriptor) -> RenderPipeline<C> {
         let id = self.inner.ids.mint_render_pipeline();
-        ok(self
-            .inner
+        self.inner
             .client
-            .request(Action::CreateRenderPipeline { id, desc })
-            .await?)?;
-        Ok(RenderPipeline::new(id, Arc::clone(&self.inner.client)))
+            .send(Action::CreateRenderPipeline { id, desc });
+        RenderPipeline::new(id, Arc::clone(&self.inner.client))
     }
 
-    pub async fn create_texture(
-        &self,
-        desc: &TextureDescriptor,
-    ) -> Result<Texture<C>, ClientError> {
+    pub fn create_texture(&self, desc: &TextureDescriptor) -> Texture<C> {
         let id = self.inner.ids.mint_texture();
-        ok(self
-            .inner
-            .client
-            .request(Action::CreateTexture {
-                id,
-                desc: desc.clone(),
-            })
-            .await?)?;
-        Ok(Texture::new(
+        self.inner.client.send(Action::CreateTexture {
+            id,
+            desc: desc.clone(),
+        });
+        Texture::new(
             id,
             Arc::clone(&self.inner.client),
             Arc::clone(&self.inner.ids),
-        ))
+        )
     }
 
-    pub async fn create_sampler(
-        &self,
-        desc: &SamplerDescriptor,
-    ) -> Result<Sampler<C>, ClientError> {
+    pub fn create_sampler(&self, desc: &SamplerDescriptor) -> Sampler<C> {
         let id = self.inner.ids.mint_sampler();
-        ok(self
-            .inner
-            .client
-            .request(Action::CreateSampler {
-                id,
-                desc: desc.clone(),
-            })
-            .await?)?;
-        Ok(Sampler::new(id, Arc::clone(&self.inner.client)))
+        self.inner.client.send(Action::CreateSampler {
+            id,
+            desc: desc.clone(),
+        });
+        Sampler::new(id, Arc::clone(&self.inner.client))
     }
 
     pub fn create_command_encoder(&self, label: Option<String>) -> CommandEncoder<C> {
@@ -268,25 +229,21 @@ pub struct Queue<C: Connection + Clone + 'static> {
 }
 
 impl<C: Connection + Clone + 'static> Queue<C> {
-    pub async fn write_buffer(
-        &self,
-        buffer: &Buffer<C>,
-        offset: u64,
-        data: bytes::Bytes,
-    ) -> Result<(), ClientError> {
-        ok(self
-            .inner
-            .client
-            .request(Action::WriteBuffer {
-                buffer: buffer.id(),
-                offset,
-                data,
-            })
-            .await?)?;
-        Ok(())
+    /// Schedule a buffer write. Sync — fire-and-forget on the multiplexed
+    /// stream, ordered relative to subsequent actions.
+    pub fn write_buffer(&self, buffer: &Buffer<C>, offset: u64, data: bytes::Bytes) {
+        self.inner.client.send(Action::WriteBuffer {
+            buffer: buffer.id(),
+            offset,
+            data,
+        });
     }
 
-    pub async fn submit<I: IntoIterator<Item = crate::encoder::CommandBuffer>>(
+    /// Submit one or more recorded command buffers. Sync — the actual
+    /// `Action::Submit` is fired in order on the wire. Encoding errors at
+    /// recording time are unrecoverable here: returns Err if any recording
+    /// fails to serialize.
+    pub fn submit<I: IntoIterator<Item = crate::encoder::CommandBuffer>>(
         &self,
         command_buffers: I,
     ) -> Result<(), ClientError> {
@@ -295,11 +252,7 @@ impl<C: Connection + Clone + 'static> Queue<C> {
             .map(|cb| cb.into_recording().encode())
             .collect();
         let recordings = recordings?;
-        ok(self
-            .inner
-            .client
-            .request(Action::Submit { recordings })
-            .await?)?;
+        self.inner.client.send(Action::Submit { recordings });
         Ok(())
     }
 
@@ -309,14 +262,6 @@ impl<C: Connection + Clone + 'static> Queue<C> {
 }
 
 // -- helpers ----------------------------------------------------------------
-
-fn ok(r: Response) -> Result<(), ClientError> {
-    match r {
-        Response::Ok => Ok(()),
-        Response::Error { code, message } => Err(ClientError::ServerError(code, message)),
-        other => Err(unexpected("Ok", other)),
-    }
-}
 
 fn unexpected(want: &'static str, got: Response) -> ClientError {
     ClientError::ServerError(

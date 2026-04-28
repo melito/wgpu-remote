@@ -26,17 +26,14 @@ use wgpu_remote_transport::Connection;
 
 use crate::{Client, ClientError, ids::IdMinter};
 
-/// Spawns the destroy action without waiting for the response. Failures are
-/// logged but never propagated — drop is infallible.
+/// Ships the destroy action without waiting for the response. Drop is
+/// infallible — any error surfaces later as `UnknownResource` if anyone
+/// references the freed ID.
 fn spawn_destroy<C>(client: Arc<Client<C>>, resource: ResourceId)
 where
     C: Connection + Clone + 'static,
 {
-    tokio::spawn(async move {
-        if let Err(e) = client.request(Action::Destroy(resource)).await {
-            eprintln!("destroy {resource:?} failed: {e}");
-        }
-    });
+    client.send(Action::Destroy(resource));
 }
 
 /// Generates a typed resource: `pub struct $name { inner: Arc<$inner_name> }`,
@@ -216,30 +213,17 @@ impl<C: Connection + Clone + 'static> Texture<C> {
         self.inner.id
     }
 
-    /// Create a view onto this texture. Awaits the server's Ok before
-    /// returning — same race-avoidance reasoning as `create_buffer`.
-    pub async fn create_view(
-        &self,
-        desc: TextureViewDescriptor,
-    ) -> Result<TextureView<C>, ClientError> {
+    /// Create a view onto this texture. Sync — the action is enqueued in
+    /// order on the multiplexed stream, so any subsequent reference to the
+    /// returned view's ID will see the view created on the server.
+    pub fn create_view(&self, desc: TextureViewDescriptor) -> TextureView<C> {
         let view_id = self.inner.ids.mint_texture_view();
-        let response = self
-            .inner
-            .client
-            .request(Action::CreateTextureView {
-                id: view_id,
-                texture: self.inner.id,
-                desc,
-            })
-            .await?;
-        match response {
-            Response::Ok => Ok(TextureView::new(view_id, Arc::clone(&self.inner.client))),
-            Response::Error { code, message } => Err(ClientError::ServerError(code, message)),
-            other => Err(ClientError::ServerError(
-                wgpu_remote_protocol::responses::ErrorCode::Internal,
-                format!("expected Ok, got {other:?}"),
-            )),
-        }
+        self.inner.client.send(Action::CreateTextureView {
+            id: view_id,
+            texture: self.inner.id,
+            desc,
+        });
+        TextureView::new(view_id, Arc::clone(&self.inner.client))
     }
 }
 

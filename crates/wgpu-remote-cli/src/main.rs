@@ -246,25 +246,22 @@ async fn compute_double(c: Common, count: u32) -> anyhow::Result<()> {
             size: buffer_size,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
-        })
-        .await?;
+        });
     let staging = device
         .create_buffer(&BufferDescriptor {
             label: Some("staging".into()),
             size: buffer_size,
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
-        })
-        .await?;
+        });
 
-    queue.write_buffer(&storage, 0, input_bytes.clone()).await?;
+    queue.write_buffer(&storage, 0, input_bytes.clone());
 
     let shader = device
         .create_shader_module(ShaderModuleDescriptor {
             label: Some("double".into()),
             source: ShaderSource::Wgsl(DOUBLE_SHADER.into()),
-        })
-        .await?;
+        });
 
     let bgl = device
         .create_bind_group_layout(BindGroupLayoutDescriptor {
@@ -279,8 +276,7 @@ async fn compute_double(c: Common, count: u32) -> anyhow::Result<()> {
                 },
                 count: None,
             }],
-        })
-        .await?;
+        });
 
     let bind_group = device
         .create_bind_group(BindGroupDescriptor {
@@ -294,16 +290,14 @@ async fn compute_double(c: Common, count: u32) -> anyhow::Result<()> {
                     size: None,
                 },
             }],
-        })
-        .await?;
+        });
 
     let pipeline_layout = device
         .create_pipeline_layout(PipelineLayoutDescriptor {
             label: Some("compute-layout".into()),
             bind_group_layouts: vec![bgl.id()],
             push_constant_ranges: vec![],
-        })
-        .await?;
+        });
 
     let pipeline = device
         .create_compute_pipeline(ComputePipelineDescriptor {
@@ -312,8 +306,7 @@ async fn compute_double(c: Common, count: u32) -> anyhow::Result<()> {
             module: shader.id(),
             entry_point: Some("main".into()),
             constants: vec![],
-        })
-        .await?;
+        });
 
     let mut encoder = device.create_command_encoder(Some("double-cmds".into()));
     {
@@ -323,7 +316,7 @@ async fn compute_double(c: Common, count: u32) -> anyhow::Result<()> {
         pass.dispatch_workgroups(count, 1, 1);
     }
     encoder.copy_buffer_to_buffer(&storage, 0, &staging, 0, buffer_size);
-    queue.submit([encoder.finish()]).await?;
+    queue.submit([encoder.finish()])?;
 
     let bytes = staging.read_all().await?;
     let output: Vec<u32> = bytes
@@ -415,11 +408,8 @@ async fn render_checkerboard(c: Common, args: CheckerboardArgs) -> anyhow::Resul
             format: TextureFormat::Rgba8Unorm,
             usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
             view_formats: vec![],
-        })
-        .await?;
-    let view = texture
-        .create_view(TextureViewDescriptor::default())
-        .await?;
+        });
+    let view = texture.create_view(TextureViewDescriptor::default());
 
     // 2. Uniform buffer carrying tile size + image dimensions.
     let unpadded_bpr = args.width * 4;
@@ -448,11 +438,8 @@ async fn render_checkerboard(c: Common, args: CheckerboardArgs) -> anyhow::Resul
             size: 16,
             usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
             mapped_at_creation: false,
-        })
-        .await?;
-    queue
-        .write_buffer(&uniform, 0, Bytes::copy_from_slice(&params_bytes))
-        .await?;
+        });
+    queue.write_buffer(&uniform, 0, Bytes::copy_from_slice(&params_bytes));
 
     let staging = device
         .create_buffer(&BufferDescriptor {
@@ -460,8 +447,7 @@ async fn render_checkerboard(c: Common, args: CheckerboardArgs) -> anyhow::Resul
             size: staging_size,
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
-        })
-        .await?;
+        });
 
     // 3. Bind group + pipeline.
     let bgl = device
@@ -477,8 +463,7 @@ async fn render_checkerboard(c: Common, args: CheckerboardArgs) -> anyhow::Resul
                 },
                 count: None,
             }],
-        })
-        .await?;
+        });
     let bind_group = device
         .create_bind_group(BindGroupDescriptor {
             label: Some("params-bg".into()),
@@ -491,21 +476,18 @@ async fn render_checkerboard(c: Common, args: CheckerboardArgs) -> anyhow::Resul
                     size: None,
                 },
             }],
-        })
-        .await?;
+        });
     let pipeline_layout = device
         .create_pipeline_layout(PipelineLayoutDescriptor {
             label: Some("checker-layout".into()),
             bind_group_layouts: vec![bgl.id()],
             push_constant_ranges: vec![],
-        })
-        .await?;
+        });
     let shader = device
         .create_shader_module(ShaderModuleDescriptor {
             label: Some("checkerboard".into()),
             source: ShaderSource::Wgsl(CHECKERBOARD_SHADER.into()),
-        })
-        .await?;
+        });
     let pipeline = device
         .create_render_pipeline(RenderPipelineDescriptor {
             label: Some("checker-pipe".into()),
@@ -530,8 +512,7 @@ async fn render_checkerboard(c: Common, args: CheckerboardArgs) -> anyhow::Resul
                 })],
             }),
             multiview: None,
-        })
-        .await?;
+        });
 
     // 4. Encode + submit.
     let mut encoder = device.create_command_encoder(Some("checker-cmds".into()));
@@ -571,7 +552,7 @@ async fn render_checkerboard(c: Common, args: CheckerboardArgs) -> anyhow::Resul
             depth_or_array_layers: 1,
         },
     );
-    queue.submit([encoder.finish()]).await?;
+    queue.submit([encoder.finish()])?;
 
     // 5. Read back, strip padding, write PPM (P6) RGB.
     let raw = staging.read_all().await?;

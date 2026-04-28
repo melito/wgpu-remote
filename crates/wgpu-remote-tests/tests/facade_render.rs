@@ -78,9 +78,8 @@ async fn facade_render_to_texture() -> anyhow::Result<()> {
             format: TextureFormat::Rgba8Unorm,
             usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
             view_formats: vec![],
-        })
-        .await?;
-    let view = texture.create_view(TextureViewDescriptor::default()).await?;
+        });
+    let view = texture.create_view(TextureViewDescriptor::default());
 
     // 2. Staging buffer for readback. Has to allow PADDED_BPR per row.
     let staging_size = (PADDED_BPR * TEX_H) as u64;
@@ -90,23 +89,20 @@ async fn facade_render_to_texture() -> anyhow::Result<()> {
             size: staging_size,
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
-        })
-        .await?;
+        });
 
     // 3. Pipeline (no bind groups → no BGL needed; use empty pipeline layout).
     let shader = device
         .create_shader_module(ShaderModuleDescriptor {
             label: Some("solid".into()),
             source: ShaderSource::Wgsl(SHADER.into()),
-        })
-        .await?;
+        });
     let layout = device
         .create_pipeline_layout(PipelineLayoutDescriptor {
             label: Some("empty".into()),
             bind_group_layouts: vec![],
             push_constant_ranges: vec![],
-        })
-        .await?;
+        });
     let pipeline = device
         .create_render_pipeline(RenderPipelineDescriptor {
             label: Some("solid-pipe".into()),
@@ -131,8 +127,7 @@ async fn facade_render_to_texture() -> anyhow::Result<()> {
                 })],
             }),
             multiview: None,
-        })
-        .await?;
+        });
 
     // 4. Encode the render pass + readback copy.
     let mut encoder = device.create_command_encoder(Some("render-cmds".into()));
@@ -177,7 +172,7 @@ async fn facade_render_to_texture() -> anyhow::Result<()> {
             depth_or_array_layers: 1,
         },
     );
-    queue.submit([encoder.finish()]).await?;
+    queue.submit([encoder.finish()])?;
 
     // 5. Read back. Strip padding row-by-row.
     let raw: Bytes = staging.read_all().await?;

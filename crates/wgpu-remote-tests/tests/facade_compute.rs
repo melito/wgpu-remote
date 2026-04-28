@@ -53,25 +53,22 @@ async fn facade_compute_double() -> anyhow::Result<()> {
             size: buffer_size,
             usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
             mapped_at_creation: false,
-        })
-        .await?;
+        });
     let staging = device
         .create_buffer(&BufferDescriptor {
             label: Some("staging".into()),
             size: buffer_size,
             usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
             mapped_at_creation: false,
-        })
-        .await?;
+        });
 
-    queue.write_buffer(&storage, 0, input_bytes.clone()).await?;
+    queue.write_buffer(&storage, 0, input_bytes.clone());
 
     let shader = device
         .create_shader_module(ShaderModuleDescriptor {
             label: Some("double".into()),
             source: ShaderSource::Wgsl(DOUBLE_SHADER.into()),
-        })
-        .await?;
+        });
 
     let bgl = device
         .create_bind_group_layout(BindGroupLayoutDescriptor {
@@ -86,8 +83,7 @@ async fn facade_compute_double() -> anyhow::Result<()> {
                 },
                 count: None,
             }],
-        })
-        .await?;
+        });
 
     let bind_group = device
         .create_bind_group(BindGroupDescriptor {
@@ -101,16 +97,14 @@ async fn facade_compute_double() -> anyhow::Result<()> {
                     size: None,
                 },
             }],
-        })
-        .await?;
+        });
 
     let pipeline_layout = device
         .create_pipeline_layout(PipelineLayoutDescriptor {
             label: Some("compute-layout".into()),
             bind_group_layouts: vec![bgl.id()],
             push_constant_ranges: vec![],
-        })
-        .await?;
+        });
 
     let pipeline = device
         .create_compute_pipeline(ComputePipelineDescriptor {
@@ -119,8 +113,7 @@ async fn facade_compute_double() -> anyhow::Result<()> {
             module: shader.id(),
             entry_point: Some("main".into()),
             constants: vec![],
-        })
-        .await?;
+        });
 
     // Encode: compute pass + copy storage→staging.
     let mut encoder = device.create_command_encoder(Some("double-cmds".into()));
@@ -133,7 +126,7 @@ async fn facade_compute_double() -> anyhow::Result<()> {
     encoder.copy_buffer_to_buffer(&storage, 0, &staging, 0, buffer_size);
     let cb = encoder.finish();
 
-    queue.submit([cb]).await?;
+    queue.submit([cb])?;
 
     // Read back.
     let bytes = staging.read_all().await?;
