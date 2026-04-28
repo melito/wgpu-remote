@@ -31,11 +31,21 @@ cargo build --release
     --server 127.0.0.1:4433 \
     --cert /tmp/wgpu-remote-cert.der \
     --count 16
+
+# Terminal 2: render an actual image
+./target/release/wgpu-remote-cli render-checkerboard \
+    --server 127.0.0.1:4433 \
+    --cert /tmp/wgpu-remote-cert.der \
+    --width 512 --height 512 --tile 64 \
+    --output /tmp/checker.ppm
+open /tmp/checker.ppm   # macOS; xdg-open elsewhere
 ```
 
-The `compute-double` workload uploads `[1..=N]` to a storage buffer, dispatches a WGSL compute shader that doubles each value, copies the result to a staging buffer, maps it for read, and prints input vs. output. Every step crosses the QUIC connection.
+`compute-double` uploads `[1..=N]` to a storage buffer, dispatches a WGSL compute shader that doubles each value, copies the result to a staging buffer, maps it for read, and prints input vs. output.
 
-For multi-machine use, copy `/tmp/wgpu-remote-cert.der` to the client side; it's regenerated on every server start.
+`render-checkerboard` allocates a render-target texture, runs a fragment shader that paints a checkerboard pattern, copies the texture to a staging buffer, reads it back, and writes a PPM image you can open in any viewer.
+
+Every step crosses the QUIC connection. For multi-machine use, copy `/tmp/wgpu-remote-cert.der` to the client side; it's regenerated on every server start.
 
 ## Architecture
 
@@ -134,22 +144,24 @@ A type alias prelude or wgpu's `custom` cargo feature integration would smooth t
 ## Status
 
 **Working today**:
-- Compute pipelines (WGSL shaders)
 - Buffers (create, write, copy, map for read)
+- Textures, texture views, samplers
+- Compute pipelines (WGSL shaders) + compute pass dispatch
+- Render pipelines + render-to-texture (color attachments, load/store ops)
 - Bind group layouts + bind groups
-- Pipeline layouts + compute pipelines
-- Command encoder + compute pass recording
+- Pipeline layouts (compute and render)
+- Command encoder + compute pass + render pass recording
+- `copy_buffer_to_buffer`, `copy_texture_to_buffer`, `copy_buffer_to_texture`
 - Queue submit
 - Cross-process / cross-machine over QUIC with self-signed cert pinning
 
 **Not yet** (v1.1+):
-- Render pipelines / render passes / render-to-texture
-- Textures, texture views, samplers
 - SPIR-V / GLSL shader sources (WGSL only)
 - Multi-client session scoping (currently one shared engine = one shared GPU device)
 - iroh transport (NodeId / hole-punch / relay)
 - Fire-and-forget creates (needs single-stream-per-connection multiplexing)
 - Real PKI flow for cert provisioning
+- Compressed texture formats and acceleration structures
 
 **Probably never** (out of scope unless someone needs it):
 - Surface acquire / present (use video streaming for that)
@@ -169,15 +181,17 @@ Notable end-to-end tests:
 | `engine_buffer / engine_compute`              | Engine dispatches against a real GPU. |
 | `quic_compute`                                | Same workload over real QUIC, in-process. |
 | `spawn_binary::binary_compute_double`         | Spawns the actual server binary, runs the workload over a real socket — proves the architecture works across an OS process boundary. |
-| `facade_compute_double`                       | The whole workload using only wgpu-shaped facade types — no `Action` enum visible. |
+| `facade_compute_double`                       | The compute workload using only wgpu-shaped facade types — no `Action` enum visible. |
+| `facade_render_to_texture`                    | Same shape but for the render path: fragment shader → texture → readback → per-pixel assertion. |
 
 ## Roadmap (rough)
 
-1. Render-pass + texture support — unlocks the CAD path.
-2. Single-stream-per-connection multiplexing — re-enables fire-and-forget creates.
-3. wgpu's `custom` cargo feature integration — true drop-in for existing wgpu apps.
-4. iroh transport — laptop ↔ home-GPU NAT-traversed scenario.
-5. Type-aliased prelude to hide the `Connection` generic.
+1. Single-stream-per-connection multiplexing — re-enables fire-and-forget creates.
+2. wgpu's `custom` cargo feature integration — true drop-in for existing wgpu apps.
+3. iroh transport — laptop ↔ home-GPU NAT-traversed scenario.
+4. Type-aliased prelude to hide the `Connection` generic.
+5. Vertex/index buffer ergonomics in the facade (typed wrappers, mesh helpers).
+6. Per-connection session scoping in the server (so multiple clients don't share an ID namespace).
 
 ## License
 
