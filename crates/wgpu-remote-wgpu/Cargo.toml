@@ -15,3 +15,9 @@ wgpu = { workspace = true, features = ["custom"] }
 wgpu-types.workspace = true
 tokio.workspace = true
 bytes.workspace = true
+
+[dev-dependencies]
+wgpu-remote-server.workspace = true
+wgpu-remote-tests.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+anyhow.workspace = true

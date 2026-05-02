@@ -1766,11 +1766,14 @@ dependencies = [
 name = "wgpu-remote-wgpu"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "bytes",
  "tokio",
  "wgpu",
  "wgpu-remote-client",
  "wgpu-remote-protocol",
+ "wgpu-remote-server",
+ "wgpu-remote-tests",
  "wgpu-remote-transport",
  "wgpu-types",
 ]

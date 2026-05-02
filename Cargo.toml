@@ -27,6 +27,7 @@ wgpu-remote-client = { path = "crates/wgpu-remote-client" }
 wgpu-remote-wgpu = { path = "crates/wgpu-remote-wgpu" }
 wgpu-remote-cli = { path = "crates/wgpu-remote-cli" }
 wgpu-remote-server = { path = "crates/wgpu-remote-server" }
+wgpu-remote-tests = { path = "crates/wgpu-remote-tests" }
 
 # Pin wgpu — client and server MUST agree on this exact version
 wgpu = "27"
