@@ -14,6 +14,7 @@ pub mod client;
 pub mod encoder;
 pub mod ids;
 pub mod instance;
+pub mod prelude;
 pub mod resources;
 
 pub use client::{Client, ClientError};

@@ -7,6 +7,16 @@ license.workspace = true
 repository.workspace = true
 description = "Client facade that exposes wgpu::Instance backed by a remote GPU."
 
+[features]
+default = ["quic"]
+# Enables the [`prelude::quic`] module of QuicConnection-specialized
+# type aliases. The transport crate's `quic` feature is on by default at the
+# workspace level, so disabling this only hides the prelude module — it
+# doesn't actually shrink the dependency graph. Real shrinking would require
+# `default-features = false` on the workspace dep, which Cargo forbids
+# overriding from a member crate.
+quic = []
+
 [dependencies]
 wgpu-remote-protocol.workspace = true
 wgpu-remote-transport.workspace = true

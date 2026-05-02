@@ -5,17 +5,8 @@
 use std::num::NonZeroU64;
 
 use bytes::Bytes;
-use wgpu_remote_client::{
-    BindGroupLayoutEntry, BindingType, BufferBindingType, BufferUsages, Client, Instance,
-    ShaderStages,
-    descriptors::{
-        BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindingResource,
-        BufferDescriptor, ComputePipelineDescriptor, PipelineLayoutDescriptor,
-        ShaderModuleDescriptor, ShaderSource,
-    },
-};
 use wgpu_remote_server::{Engine, run_connection};
-use wgpu_remote_tests::pair;
+use wgpu_remote_tests::prelude::in_memory::*;
 
 const DOUBLE_SHADER: &str = r#"
 @group(0) @binding(0) var<storage, read_write> data: array<u32>;

@@ -18,18 +18,8 @@ use std::process::ExitCode;
 
 use bytes::Bytes;
 use rustls::pki_types::CertificateDer;
-use wgpu_remote_client::{
-    BindGroupLayoutEntry, BindingType, BufferBindingType, BufferUsages, Client, ColorAttachment,
-    Instance, RenderPassDescriptor, ShaderStages,
-    descriptors::{
-        BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindingResource,
-        BufferDescriptor, ComputePipelineDescriptor, FragmentState, PipelineLayoutDescriptor,
-        RenderPipelineDescriptor, ShaderModuleDescriptor, ShaderSource, TextureDescriptor,
-        TextureViewDescriptor, VertexState,
-    },
-};
+use wgpu_remote_client::prelude::quic::*;
 use wgpu_remote_protocol::{Action, PROTOCOL_VERSION, Response};
-use wgpu_remote_transport::quic::QuicEndpoint;
 use wgpu_types::{
     Color, ColorTargetState, ColorWrites, Extent3d, LoadOp, MultisampleState, Operations,
     Origin3d, PrimitiveState, StoreOp, TexelCopyBufferLayout, TextureAspect, TextureDimension,

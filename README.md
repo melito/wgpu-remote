@@ -106,8 +106,7 @@ We use the seam Firefox uses for its content↔GPU process bridge: serialize at 
 ## Using the facade
 
 ```rust
-use wgpu_remote_client::{Instance, Client, BufferUsages, ...};
-use wgpu_remote_transport::quic::QuicEndpoint;
+use wgpu_remote_client::prelude::quic::*;
 use rustls::pki_types::CertificateDer;
 
 let cert = CertificateDer::from(std::fs::read("server-cert.der")?);
@@ -118,8 +117,8 @@ let instance = Instance::new(Client::new(connection));
 let adapter  = instance.request_adapter().await?;
 let (device, queue) = adapter.request_device().await?;
 
-let buffer = device.create_buffer(&BufferDescriptor { /* ... */ }).await?;
-queue.write_buffer(&buffer, 0, bytes).await?;
+let buffer = device.create_buffer(&BufferDescriptor { /* ... */ });
+queue.write_buffer(&buffer, 0, bytes);
 
 let mut encoder = device.create_command_encoder(None);
 {
@@ -128,18 +127,21 @@ let mut encoder = device.create_command_encoder(None);
     pass.set_bind_group(0, &bind_group, &[]);
     pass.dispatch_workgroups(64, 1, 1);
 }
-queue.submit([encoder.finish()]).await?;
+queue.submit([encoder.finish()])?;
 
 let bytes = readback_buffer.read_all().await?;
 ```
 
-The facade is *similar* to wgpu but not a drop-in replacement yet:
+The facade is *similar* to wgpu but not yet a drop-in replacement:
 
-- `Device::create_buffer` is `async` (one-stream-per-request races without it).
-- Buffer readback uses `read_range(..) / read_all()` instead of `slice + map_async + get_mapped_range`.
-- All types carry a `Connection` generic parameter.
+- `request_adapter` and `request_device` are `async` (they make a real round-trip).
+- Buffer readback uses `read_range(..)` / `read_all()` instead of
+  `slice(..).map_async(..) + get_mapped_range`.
+- The full-strength API uses generic types (`Buffer<C>`, `Device<C>`, …); the
+  preludes [`prelude::quic`] and `wgpu_remote_tests::prelude::in_memory`
+  hide the generic for the common transports.
 
-A type alias prelude or wgpu's `custom` cargo feature integration would smooth these out — see *Roadmap*.
+The remaining gap to a full drop-in is wgpu's `custom` cargo feature integration — see *Roadmap*.
 
 ## Status
 
@@ -155,13 +157,13 @@ A type alias prelude or wgpu's `custom` cargo feature integration would smooth t
 - Queue submit
 - Cross-process / cross-machine over QUIC with self-signed cert pinning
 
-**Not yet** (v1.1+):
+**Not yet** (v1.2+):
 - SPIR-V / GLSL shader sources (WGSL only)
 - Multi-client session scoping (currently one shared engine = one shared GPU device)
 - iroh transport (NodeId / hole-punch / relay)
-- Fire-and-forget creates (needs single-stream-per-connection multiplexing)
 - Real PKI flow for cert provisioning
 - Compressed texture formats and acceleration structures
+- True drop-in for stock wgpu apps via wgpu's `custom` cargo feature
 
 **Probably never** (out of scope unless someone needs it):
 - Surface acquire / present (use video streaming for that)
@@ -175,23 +177,22 @@ cargo test --workspace
 
 Notable end-to-end tests:
 
-| Test                                          | What it proves |
-|-----------------------------------------------|----------------|
-| `wgpu-remote-protocol::*`                     | Wire format roundtrips. |
-| `engine_buffer / engine_compute`              | Engine dispatches against a real GPU. |
-| `quic_compute`                                | Same workload over real QUIC, in-process. |
-| `spawn_binary::binary_compute_double`         | Spawns the actual server binary, runs the workload over a real socket — proves the architecture works across an OS process boundary. |
-| `facade_compute_double`                       | The compute workload using only wgpu-shaped facade types — no `Action` enum visible. |
-| `facade_render_to_texture`                    | Same shape but for the render path: fragment shader → texture → readback → per-pixel assertion. |
+| Test                                  | What it proves                                                                                                                       |
+|---------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------|
+| `wgpu-remote-protocol::*`             | Wire format roundtrips.                                                                                                              |
+| `engine_buffer / engine_compute`      | Engine dispatches against a real GPU.                                                                                                |
+| `quic_compute`                        | Same workload over real QUIC, in-process.                                                                                            |
+| `spawn_binary::binary_compute_double` | Spawns the actual server binary, runs the workload over a real socket — proves the architecture works across an OS process boundary. |
+| `facade_compute_double`               | The compute workload using only wgpu-shaped facade types — no `Action` enum visible.                                                 |
+| `facade_render_to_texture`            | Same shape but for the render path: fragment shader → texture → readback → per-pixel assertion.                                      |
 
 ## Roadmap (rough)
 
-1. Single-stream-per-connection multiplexing — re-enables fire-and-forget creates.
-2. wgpu's `custom` cargo feature integration — true drop-in for existing wgpu apps.
-3. iroh transport — laptop ↔ home-GPU NAT-traversed scenario.
-4. Type-aliased prelude to hide the `Connection` generic.
-5. Vertex/index buffer ergonomics in the facade (typed wrappers, mesh helpers).
-6. Per-connection session scoping in the server (so multiple clients don't share an ID namespace).
+1. wgpu's `custom` cargo feature integration — true drop-in for existing wgpu apps.
+2. iroh transport — laptop ↔ home-GPU NAT-traversed scenario.
+3. Per-connection session scoping in the server (so multiple clients don't share an ID namespace).
+4. Vertex/index buffer ergonomics in the facade (typed wrappers, mesh helpers).
+5. SPIR-V / GLSL shader source variants on the wire.
 
 ## License
 
