@@ -5,6 +5,7 @@ members = [
     "crates/wgpu-remote-transport",
     "crates/wgpu-remote-transport-iroh",
     "crates/wgpu-remote-client",
+    "crates/wgpu-remote-wgpu",
     "crates/wgpu-remote-cli",
     "crates/wgpu-remote-server",
     "crates/wgpu-remote-tests",
@@ -23,6 +24,7 @@ wgpu-remote-protocol = { path = "crates/wgpu-remote-protocol" }
 wgpu-remote-transport = { path = "crates/wgpu-remote-transport" }
 wgpu-remote-transport-iroh = { path = "crates/wgpu-remote-transport-iroh" }
 wgpu-remote-client = { path = "crates/wgpu-remote-client" }
+wgpu-remote-wgpu = { path = "crates/wgpu-remote-wgpu" }
 wgpu-remote-cli = { path = "crates/wgpu-remote-cli" }
 wgpu-remote-server = { path = "crates/wgpu-remote-server" }
 

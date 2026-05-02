@@ -1,0 +1,17 @@
+[package]
+name = "wgpu-remote-wgpu"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "wgpu drop-in: hand a Connection to install() and get back a real wgpu::Instance backed by a remote GPU."
+
+[dependencies]
+wgpu-remote-client.workspace = true
+wgpu-remote-protocol.workspace = true
+wgpu-remote-transport.workspace = true
+wgpu = { workspace = true, features = ["custom"] }
+wgpu-types.workspace = true
+tokio.workspace = true
+bytes.workspace = true

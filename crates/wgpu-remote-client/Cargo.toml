@@ -5,7 +5,7 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
-description = "Client facade that exposes wgpu::Instance backed by a remote GPU."
+description = "Client-side wgpu-shaped facade for a remote GPU. For a true wgpu drop-in see the wgpu-remote-wgpu crate."
 
 [features]
 default = ["quic"]

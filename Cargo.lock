@@ -1763,6 +1763,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "wgpu-remote-wgpu"
+version = "0.1.0"
+dependencies = [
+ "bytes",
+ "tokio",
+ "wgpu",
+ "wgpu-remote-client",
+ "wgpu-remote-protocol",
+ "wgpu-remote-transport",
+ "wgpu-types",
+]
+
+[[package]]
 name = "wgpu-types"
 version = "27.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
