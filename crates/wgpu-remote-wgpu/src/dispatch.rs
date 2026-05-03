@@ -5,29 +5,51 @@
 //! facade type plus any state the custom-backend protocol demands (callback
 //! storage, error channels). Trait impls forward to the facade.
 //!
-//! Currently scaffolded down to `request_device` (returning a stub Device +
-//! Queue). Resource creates, encoders, passes, and `map_async` land in
-//! follow-up commits — each unimplemented method is marked with a
-//! `unimplemented!()` carrying a precise reason so partial-build users see a
-//! readable failure rather than a mystery panic.
+//! Currently wired:
+//! - Instance, Adapter, Device, Queue construction.
+//! - All `Device::create_*` paths (buffer, texture, texture view, sampler,
+//!   shader module, bind group [layout], pipeline layout, compute/render
+//!   pipeline). Each maps a wgpu descriptor through [`crate::translate`]
+//!   then calls the facade's create method, which is sync + fire-and-forget
+//!   thanks to the multiplexed-stream guarantee.
+//!
+//! Still stubbed: encoder + passes (need lifetime-bridging via
+//! `Arc<Mutex<facade::CommandEncoder<C>>>`), `Queue::submit` /
+//! `write_buffer`, `Buffer::map_async`. Each `unimplemented!()` carries a
+//! precise reason so partial-build users see a readable failure.
 
 use std::sync::Arc;
 
 use wgpu::custom::{
-    AdapterInterface, DeviceInterface, DispatchAdapter, DispatchBindGroup,
-    DispatchBindGroupLayout, DispatchBlas, DispatchBuffer, DispatchCommandBuffer,
-    DispatchCommandEncoder, DispatchComputePipeline, DispatchDevice, DispatchExternalTexture,
-    DispatchPipelineCache, DispatchPipelineLayout, DispatchQuerySet, DispatchQueue,
-    DispatchQueueWriteBuffer, DispatchRenderBundleEncoder, DispatchRenderPipeline,
-    DispatchSampler, DispatchShaderModule, DispatchSurface, DispatchTexture, DispatchTlas,
-    InstanceInterface, PopErrorScopeFuture, QueueInterface, RequestAdapterFuture,
-    RequestDeviceFuture,
+    AdapterInterface, BindGroupInterface, BindGroupLayoutInterface, BufferInterface,
+    ComputePipelineInterface, DeviceInterface, DispatchAdapter, DispatchBindGroup,
+    DispatchBindGroupLayout, DispatchBlas, DispatchBuffer, DispatchBufferMappedRange,
+    DispatchCommandBuffer, DispatchCommandEncoder, DispatchComputePipeline, DispatchDevice,
+    DispatchExternalTexture, DispatchPipelineCache, DispatchPipelineLayout, DispatchQuerySet,
+    DispatchQueue, DispatchQueueWriteBuffer, DispatchRenderBundleEncoder,
+    DispatchRenderPipeline, DispatchSampler, DispatchShaderModule, DispatchSurface,
+    DispatchTexture, DispatchTextureView, DispatchTlas, InstanceInterface,
+    PipelineLayoutInterface, PopErrorScopeFuture, QueueInterface, RenderPipelineInterface,
+    RequestAdapterFuture, RequestDeviceFuture, SamplerInterface, ShaderCompilationInfoFuture,
+    ShaderModuleInterface, TextureInterface, TextureViewInterface,
 };
 use wgpu_remote_client::{
-    Adapter as FacadeAdapter, Client, Device as FacadeDevice, Instance as FacadeInstance,
-    Queue as FacadeQueue,
+    Adapter as FacadeAdapter,
+    BindGroup as FacadeBindGroup, BindGroupLayout as FacadeBindGroupLayout,
+    Buffer as FacadeBuffer, Client, ComputePipeline as FacadeComputePipeline,
+    Device as FacadeDevice, Instance as FacadeInstance,
+    PipelineLayout as FacadePipelineLayout, Queue as FacadeQueue,
+    RenderPipeline as FacadeRenderPipeline, Sampler as FacadeSampler,
+    ShaderModule as FacadeShaderModule, Texture as FacadeTexture,
+    TextureView as FacadeTextureView,
+};
+use wgpu_remote_protocol::ids::{
+    BindGroupId, BindGroupLayoutId, BufferId, ComputePipelineId, PipelineLayoutId,
+    RenderPipelineId, SamplerId, ShaderModuleId, TextureId, TextureViewId,
 };
 use wgpu_remote_transport::Connection;
+
+use crate::translate;
 
 // ---------------------------------------------------------------------------
 // Instance
@@ -221,7 +243,207 @@ impl<C: Connection + Clone + 'static> AdapterInterface for Adapter<C> {
 }
 
 // ---------------------------------------------------------------------------
-// Device + Queue (stub: methods unimplemented)
+// Resource adapter structs
+// ---------------------------------------------------------------------------
+//
+// Each one wraps the corresponding facade type and implements the matching
+// `wgpu::custom::*Interface`. Most interfaces are *empty* (just `CommonTraits`
+// = `Send + Sync + Debug + 'static`), so the impls below are mostly trivial.
+//
+// Why one struct per resource type even when the trait is empty: wgpu's
+// dispatch layer downcasts via type identity. Two resources of different
+// kinds must be distinct concrete types so `Buffer::as_custom::<Buffer<C>>()`
+// can succeed without aliasing with, say, `Sampler::as_custom::<Sampler<C>>()`.
+
+macro_rules! resource_adapter {
+    (
+        $name:ident, $facade:ident, $id_ty:ty, $interface:ident
+    ) => {
+        pub(crate) struct $name<C: Connection + Clone + 'static> {
+            pub(crate) facade: $facade<C>,
+        }
+
+        impl<C: Connection + Clone + 'static> $name<C> {
+            pub(crate) fn id(&self) -> $id_ty {
+                self.facade.id()
+            }
+        }
+
+        impl<C: Connection + Clone + 'static> std::fmt::Debug for $name<C> {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.debug_struct(concat!("wgpu_remote_wgpu::", stringify!($name)))
+                    .finish_non_exhaustive()
+            }
+        }
+
+        impl<C: Connection + Clone + 'static> $interface for $name<C> {}
+    };
+}
+
+resource_adapter!(BindGroupLayout, FacadeBindGroupLayout, BindGroupLayoutId, BindGroupLayoutInterface);
+resource_adapter!(BindGroup, FacadeBindGroup, BindGroupId, BindGroupInterface);
+resource_adapter!(Sampler, FacadeSampler, SamplerId, SamplerInterface);
+resource_adapter!(TextureView, FacadeTextureView, TextureViewId, TextureViewInterface);
+resource_adapter!(PipelineLayout, FacadePipelineLayout, PipelineLayoutId, PipelineLayoutInterface);
+
+// Buffer, ShaderModule, ComputePipeline, RenderPipeline, Texture have
+// non-empty interfaces — written out below.
+
+pub(crate) struct Buffer<C: Connection + Clone + 'static> {
+    pub(crate) facade: FacadeBuffer<C>,
+}
+
+impl<C: Connection + Clone + 'static> Buffer<C> {
+    pub(crate) fn id(&self) -> BufferId {
+        self.facade.id()
+    }
+}
+
+impl<C: Connection + Clone + 'static> std::fmt::Debug for Buffer<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("wgpu_remote_wgpu::Buffer").finish_non_exhaustive()
+    }
+}
+
+impl<C: Connection + Clone + 'static> BufferInterface for Buffer<C> {
+    fn map_async(
+        &self,
+        _mode: wgpu::MapMode,
+        _range: std::ops::Range<wgpu::wgt::BufferAddress>,
+        _callback: wgpu::custom::BufferMapCallback,
+    ) {
+        unimplemented!("Buffer::map_async — callback dispatcher lands in a follow-up commit")
+    }
+
+    fn get_mapped_range(
+        &self,
+        _sub_range: std::ops::Range<wgpu::wgt::BufferAddress>,
+    ) -> DispatchBufferMappedRange {
+        unimplemented!("Buffer::get_mapped_range — depends on map_async")
+    }
+
+    fn unmap(&self) {
+        unimplemented!("Buffer::unmap — depends on map_async")
+    }
+
+    fn destroy(&self) {
+        // Facade Drop will ship Action::Destroy. Explicit destroy() from
+        // wgpu is a hint we don't need — keeping the facade handle alive
+        // is the only control surface we expose.
+    }
+}
+
+pub(crate) struct ShaderModule<C: Connection + Clone + 'static> {
+    pub(crate) facade: FacadeShaderModule<C>,
+}
+
+impl<C: Connection + Clone + 'static> ShaderModule<C> {
+    pub(crate) fn id(&self) -> ShaderModuleId {
+        self.facade.id()
+    }
+}
+
+impl<C: Connection + Clone + 'static> std::fmt::Debug for ShaderModule<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("wgpu_remote_wgpu::ShaderModule").finish_non_exhaustive()
+    }
+}
+
+impl<C: Connection + Clone + 'static> ShaderModuleInterface for ShaderModule<C> {
+    fn get_compilation_info(&self) -> std::pin::Pin<Box<dyn ShaderCompilationInfoFuture>> {
+        // No shader compilation diagnostics are ferried over the wire yet.
+        // Report success-with-no-messages.
+        Box::pin(async {
+            wgpu::CompilationInfo {
+                messages: Vec::new(),
+            }
+        })
+    }
+}
+
+pub(crate) struct ComputePipeline<C: Connection + Clone + 'static> {
+    pub(crate) facade: FacadeComputePipeline<C>,
+}
+
+impl<C: Connection + Clone + 'static> ComputePipeline<C> {
+    pub(crate) fn id(&self) -> ComputePipelineId {
+        self.facade.id()
+    }
+}
+
+impl<C: Connection + Clone + 'static> std::fmt::Debug for ComputePipeline<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("wgpu_remote_wgpu::ComputePipeline").finish_non_exhaustive()
+    }
+}
+
+impl<C: Connection + Clone + 'static> ComputePipelineInterface for ComputePipeline<C> {
+    fn get_bind_group_layout(&self, _index: u32) -> DispatchBindGroupLayout {
+        // Pipeline-derived bind group layout introspection isn't supported
+        // yet — the protocol doesn't ferry the per-pipeline layout slots
+        // back to the client. Apps that build their own layouts up-front
+        // (the common case) won't hit this path.
+        unimplemented!(
+            "ComputePipeline::get_bind_group_layout: pipeline-derived layouts \
+             are not yet ferried back from the server"
+        )
+    }
+}
+
+pub(crate) struct RenderPipeline<C: Connection + Clone + 'static> {
+    pub(crate) facade: FacadeRenderPipeline<C>,
+}
+
+impl<C: Connection + Clone + 'static> RenderPipeline<C> {
+    pub(crate) fn id(&self) -> RenderPipelineId {
+        self.facade.id()
+    }
+}
+
+impl<C: Connection + Clone + 'static> std::fmt::Debug for RenderPipeline<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("wgpu_remote_wgpu::RenderPipeline").finish_non_exhaustive()
+    }
+}
+
+impl<C: Connection + Clone + 'static> RenderPipelineInterface for RenderPipeline<C> {
+    fn get_bind_group_layout(&self, _index: u32) -> DispatchBindGroupLayout {
+        unimplemented!(
+            "RenderPipeline::get_bind_group_layout: pipeline-derived layouts \
+             are not yet ferried back from the server"
+        )
+    }
+}
+
+pub(crate) struct Texture<C: Connection + Clone + 'static> {
+    pub(crate) facade: FacadeTexture<C>,
+}
+
+impl<C: Connection + Clone + 'static> Texture<C> {
+    pub(crate) fn id(&self) -> TextureId {
+        self.facade.id()
+    }
+}
+
+impl<C: Connection + Clone + 'static> std::fmt::Debug for Texture<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("wgpu_remote_wgpu::Texture").finish_non_exhaustive()
+    }
+}
+
+impl<C: Connection + Clone + 'static> TextureInterface for Texture<C> {
+    fn create_view(&self, desc: &wgpu::TextureViewDescriptor<'_>) -> DispatchTextureView {
+        let view = self.facade.create_view(translate::texture_view_descriptor(desc));
+        DispatchTextureView::custom(TextureView { facade: view })
+    }
+
+    fn destroy(&self) {
+        // Facade Drop ships destroy. See Buffer::destroy.
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Device + Queue
 // ---------------------------------------------------------------------------
 
 pub(crate) struct Device<C: Connection + Clone + 'static> {
@@ -246,10 +468,17 @@ impl<C: Connection + Clone + 'static> DeviceInterface for Device<C> {
 
     fn create_shader_module(
         &self,
-        _desc: wgpu::ShaderModuleDescriptor<'_>,
+        desc: wgpu::ShaderModuleDescriptor<'_>,
         _shader_bound_checks: wgpu::ShaderRuntimeChecks,
     ) -> DispatchShaderModule {
-        unimplemented!("Device::create_shader_module not yet implemented")
+        // ShaderRuntimeChecks (bounds checks) is a per-build wgpu setting
+        // that controls validation in the local backend. It's irrelevant
+        // here — bounds checks happen on the *server* against the same
+        // module, governed by the server's wgpu build.
+        let module = self
+            .facade
+            .create_shader_module(translate::shader_module_descriptor(&desc));
+        DispatchShaderModule::custom(ShaderModule { facade: module })
     }
 
     unsafe fn create_shader_module_passthrough(
@@ -269,30 +498,42 @@ impl<C: Connection + Clone + 'static> DeviceInterface for Device<C> {
 
     fn create_bind_group_layout(
         &self,
-        _desc: &wgpu::BindGroupLayoutDescriptor<'_>,
+        desc: &wgpu::BindGroupLayoutDescriptor<'_>,
     ) -> DispatchBindGroupLayout {
-        unimplemented!("Device::create_bind_group_layout not yet implemented")
+        let layout = self
+            .facade
+            .create_bind_group_layout(translate::bind_group_layout_descriptor(desc));
+        DispatchBindGroupLayout::custom(BindGroupLayout { facade: layout })
     }
 
-    fn create_bind_group(
-        &self,
-        _desc: &wgpu::BindGroupDescriptor<'_>,
-    ) -> DispatchBindGroup {
-        unimplemented!("Device::create_bind_group not yet implemented")
+    fn create_bind_group(&self, desc: &wgpu::BindGroupDescriptor<'_>) -> DispatchBindGroup {
+        // Translation can fail if a referenced resource didn't come from
+        // this backend. A future pass routes that to `on_uncaptured_error`;
+        // for now we panic with the precise diagnostic.
+        let proto = translate::bind_group_descriptor::<C>(desc)
+            .unwrap_or_else(|e| panic!("create_bind_group: {e}"));
+        let bg = self.facade.create_bind_group(proto);
+        DispatchBindGroup::custom(BindGroup { facade: bg })
     }
 
     fn create_pipeline_layout(
         &self,
-        _desc: &wgpu::PipelineLayoutDescriptor<'_>,
+        desc: &wgpu::PipelineLayoutDescriptor<'_>,
     ) -> DispatchPipelineLayout {
-        unimplemented!("Device::create_pipeline_layout not yet implemented")
+        let proto = translate::pipeline_layout_descriptor::<C>(desc)
+            .unwrap_or_else(|e| panic!("create_pipeline_layout: {e}"));
+        let layout = self.facade.create_pipeline_layout(proto);
+        DispatchPipelineLayout::custom(PipelineLayout { facade: layout })
     }
 
     fn create_render_pipeline(
         &self,
-        _desc: &wgpu::RenderPipelineDescriptor<'_>,
+        desc: &wgpu::RenderPipelineDescriptor<'_>,
     ) -> DispatchRenderPipeline {
-        unimplemented!("Device::create_render_pipeline not yet implemented")
+        let proto = translate::render_pipeline_descriptor::<C>(desc)
+            .unwrap_or_else(|e| panic!("create_render_pipeline: {e}"));
+        let pipeline = self.facade.create_render_pipeline(proto);
+        DispatchRenderPipeline::custom(RenderPipeline { facade: pipeline })
     }
 
     fn create_mesh_pipeline(
@@ -304,9 +545,12 @@ impl<C: Connection + Clone + 'static> DeviceInterface for Device<C> {
 
     fn create_compute_pipeline(
         &self,
-        _desc: &wgpu::ComputePipelineDescriptor<'_>,
+        desc: &wgpu::ComputePipelineDescriptor<'_>,
     ) -> DispatchComputePipeline {
-        unimplemented!("Device::create_compute_pipeline not yet implemented")
+        let proto = translate::compute_pipeline_descriptor::<C>(desc)
+            .unwrap_or_else(|e| panic!("create_compute_pipeline: {e}"));
+        let pipeline = self.facade.create_compute_pipeline(proto);
+        DispatchComputePipeline::custom(ComputePipeline { facade: pipeline })
     }
 
     unsafe fn create_pipeline_cache(
@@ -316,12 +560,18 @@ impl<C: Connection + Clone + 'static> DeviceInterface for Device<C> {
         unimplemented!("pipeline cache not supported by wgpu-remote")
     }
 
-    fn create_buffer(&self, _desc: &wgpu::BufferDescriptor<'_>) -> DispatchBuffer {
-        unimplemented!("Device::create_buffer not yet implemented")
+    fn create_buffer(&self, desc: &wgpu::BufferDescriptor<'_>) -> DispatchBuffer {
+        let buf = self
+            .facade
+            .create_buffer(&translate::buffer_descriptor(desc));
+        DispatchBuffer::custom(Buffer { facade: buf })
     }
 
-    fn create_texture(&self, _desc: &wgpu::TextureDescriptor<'_>) -> DispatchTexture {
-        unimplemented!("Device::create_texture not yet implemented")
+    fn create_texture(&self, desc: &wgpu::TextureDescriptor<'_>) -> DispatchTexture {
+        let tex = self
+            .facade
+            .create_texture(&translate::texture_descriptor(desc));
+        DispatchTexture::custom(Texture { facade: tex })
     }
 
     fn create_external_texture(
@@ -344,8 +594,11 @@ impl<C: Connection + Clone + 'static> DeviceInterface for Device<C> {
         unimplemented!("acceleration structures not supported by wgpu-remote")
     }
 
-    fn create_sampler(&self, _desc: &wgpu::SamplerDescriptor<'_>) -> DispatchSampler {
-        unimplemented!("Device::create_sampler not yet implemented")
+    fn create_sampler(&self, desc: &wgpu::SamplerDescriptor<'_>) -> DispatchSampler {
+        let sampler = self
+            .facade
+            .create_sampler(&translate::sampler_descriptor(desc));
+        DispatchSampler::custom(Sampler { facade: sampler })
     }
 
     fn create_query_set(&self, _desc: &wgpu::QuerySetDescriptor<'_>) -> DispatchQuerySet {

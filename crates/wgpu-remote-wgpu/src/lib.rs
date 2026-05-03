@@ -32,6 +32,7 @@
 //! [`Connection`]: wgpu_remote_transport::Connection
 
 mod dispatch;
+mod translate;
 
 use wgpu_remote_transport::Connection;
 
