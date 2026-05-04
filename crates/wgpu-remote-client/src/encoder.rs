@@ -209,6 +209,15 @@ pub struct CommandBuffer {
 }
 
 impl CommandBuffer {
+    /// Wrap a hand-built recording. Intended for consumers that record
+    /// command buffers without going through this crate's
+    /// [`CommandEncoder`] — notably, the `wgpu-remote-wgpu` drop-in, where
+    /// wgpu's own `CommandEncoder` lifetime model doesn't fit through the
+    /// facade's `&mut`-borrowing pass types.
+    pub fn from_recording(recording: CommandBufferRecording) -> Self {
+        Self { recording }
+    }
+
     pub(crate) fn into_recording(self) -> CommandBufferRecording {
         self.recording
     }

@@ -22,16 +22,18 @@ use std::sync::Arc;
 
 use wgpu::custom::{
     AdapterInterface, BindGroupInterface, BindGroupLayoutInterface, BufferInterface,
+    CommandBufferInterface, CommandEncoderInterface, ComputePassInterface,
     ComputePipelineInterface, DeviceInterface, DispatchAdapter, DispatchBindGroup,
     DispatchBindGroupLayout, DispatchBlas, DispatchBuffer, DispatchBufferMappedRange,
-    DispatchCommandBuffer, DispatchCommandEncoder, DispatchComputePipeline, DispatchDevice,
-    DispatchExternalTexture, DispatchPipelineCache, DispatchPipelineLayout, DispatchQuerySet,
-    DispatchQueue, DispatchQueueWriteBuffer, DispatchRenderBundleEncoder,
-    DispatchRenderPipeline, DispatchSampler, DispatchShaderModule, DispatchSurface,
-    DispatchTexture, DispatchTextureView, DispatchTlas, InstanceInterface,
-    PipelineLayoutInterface, PopErrorScopeFuture, QueueInterface, RenderPipelineInterface,
-    RequestAdapterFuture, RequestDeviceFuture, SamplerInterface, ShaderCompilationInfoFuture,
-    ShaderModuleInterface, TextureInterface, TextureViewInterface,
+    DispatchCommandBuffer, DispatchCommandEncoder, DispatchComputePass, DispatchComputePipeline,
+    DispatchDevice, DispatchExternalTexture, DispatchPipelineCache, DispatchPipelineLayout,
+    DispatchQuerySet, DispatchQueue, DispatchQueueWriteBuffer, DispatchRenderBundle,
+    DispatchRenderBundleEncoder, DispatchRenderPass, DispatchRenderPipeline, DispatchSampler,
+    DispatchShaderModule, DispatchSurface, DispatchTexture, DispatchTextureView, DispatchTlas,
+    InstanceInterface, PipelineLayoutInterface, PopErrorScopeFuture, QueueInterface,
+    RenderPassInterface, RenderPipelineInterface, RequestAdapterFuture, RequestDeviceFuture,
+    SamplerInterface, ShaderCompilationInfoFuture, ShaderModuleInterface, TextureInterface,
+    TextureViewInterface,
 };
 use wgpu_remote_client::{
     Adapter as FacadeAdapter,
@@ -182,6 +184,7 @@ impl<C: Connection + Clone + 'static> AdapterInterface for Adapter<C> {
                 }),
                 DispatchQueue::custom(Queue {
                     facade: Arc::clone(&queue),
+                    next_submission: std::sync::atomic::AtomicU64::new(1),
                 }),
             ))
         })
@@ -291,11 +294,23 @@ resource_adapter!(PipelineLayout, FacadePipelineLayout, PipelineLayoutId, Pipeli
 
 pub(crate) struct Buffer<C: Connection + Clone + 'static> {
     pub(crate) facade: FacadeBuffer<C>,
+    /// Stores the bytes returned by `map_async`, so subsequent
+    /// `get_mapped_range` calls can hand them to the user. wgpu's lifecycle
+    /// is map → get_mapped_range (potentially repeatedly) → unmap; we
+    /// load the bytes once on map and keep them until unmap.
+    mapped: Arc<StdMutex<Option<bytes::Bytes>>>,
 }
 
 impl<C: Connection + Clone + 'static> Buffer<C> {
     pub(crate) fn id(&self) -> BufferId {
         self.facade.id()
+    }
+
+    fn new(facade: FacadeBuffer<C>) -> Self {
+        Self {
+            facade,
+            mapped: Arc::new(StdMutex::new(None)),
+        }
     }
 }
 
@@ -309,27 +324,80 @@ impl<C: Connection + Clone + 'static> BufferInterface for Buffer<C> {
     fn map_async(
         &self,
         _mode: wgpu::MapMode,
-        _range: std::ops::Range<wgpu::wgt::BufferAddress>,
-        _callback: wgpu::custom::BufferMapCallback,
+        range: std::ops::Range<wgpu::wgt::BufferAddress>,
+        callback: wgpu::custom::BufferMapCallback,
     ) {
-        unimplemented!("Buffer::map_async — callback dispatcher lands in a follow-up commit")
+        // Spawn a tokio task to do the readback, then invoke the
+        // callback. The callback is `FnOnce + Send + 'static` — wgpu's
+        // contract.
+        //
+        // MapMode is ignored: the protocol's MapBufferForRead only
+        // supports read mode. Write-mapped buffers aren't bridged yet —
+        // call write_buffer instead.
+        let facade = self.facade.clone();
+        let mapped = Arc::clone(&self.mapped);
+        tokio::spawn(async move {
+            let result = facade.read_range(range).await;
+            match result {
+                Ok(bytes) => {
+                    *mapped.lock().unwrap() = Some(bytes);
+                    callback(Ok(()));
+                }
+                Err(_) => {
+                    callback(Err(wgpu::BufferAsyncError));
+                }
+            }
+        });
     }
 
     fn get_mapped_range(
         &self,
-        _sub_range: std::ops::Range<wgpu::wgt::BufferAddress>,
+        sub_range: std::ops::Range<wgpu::wgt::BufferAddress>,
     ) -> DispatchBufferMappedRange {
-        unimplemented!("Buffer::get_mapped_range — depends on map_async")
+        let bytes = self
+            .mapped
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("get_mapped_range called before map_async completed");
+        let start = sub_range.start as usize;
+        let end = sub_range.end as usize;
+        let slice = bytes.slice(start..end);
+        DispatchBufferMappedRange::custom(BufferMappedRange { bytes: slice })
     }
 
     fn unmap(&self) {
-        unimplemented!("Buffer::unmap — depends on map_async")
+        *self.mapped.lock().unwrap() = None;
     }
 
     fn destroy(&self) {
-        // Facade Drop will ship Action::Destroy. Explicit destroy() from
-        // wgpu is a hint we don't need — keeping the facade handle alive
-        // is the only control surface we expose.
+        // Facade Drop will ship Action::Destroy.
+    }
+}
+
+/// Handed back from `Buffer::get_mapped_range`. Owns its slice so the
+/// user can hold it across awaits without lifetime headaches.
+pub(crate) struct BufferMappedRange {
+    bytes: bytes::Bytes,
+}
+
+impl std::fmt::Debug for BufferMappedRange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("wgpu_remote_wgpu::BufferMappedRange")
+            .finish_non_exhaustive()
+    }
+}
+
+impl wgpu::custom::BufferMappedRangeInterface for BufferMappedRange {
+    fn slice(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    fn slice_mut(&mut self) -> &mut [u8] {
+        // The wire-format readback is a `Bytes` (read-only). Writes
+        // through the mapped range aren't supported yet — that's the
+        // write-mapped buffer story.
+        unimplemented!("BufferMappedRange is read-only in the current build")
     }
 }
 
@@ -564,7 +632,7 @@ impl<C: Connection + Clone + 'static> DeviceInterface for Device<C> {
         let buf = self
             .facade
             .create_buffer(&translate::buffer_descriptor(desc));
-        DispatchBuffer::custom(Buffer { facade: buf })
+        DispatchBuffer::custom(Buffer::new(buf))
     }
 
     fn create_texture(&self, desc: &wgpu::TextureDescriptor<'_>) -> DispatchTexture {
@@ -607,9 +675,9 @@ impl<C: Connection + Clone + 'static> DeviceInterface for Device<C> {
 
     fn create_command_encoder(
         &self,
-        _desc: &wgpu::CommandEncoderDescriptor<'_>,
+        desc: &wgpu::CommandEncoderDescriptor<'_>,
     ) -> DispatchCommandEncoder {
-        unimplemented!("Device::create_command_encoder not yet implemented")
+        DispatchCommandEncoder::custom(CommandEncoder::<C>::new(desc.label.map(str::to_owned)))
     }
 
     fn create_render_bundle_encoder(
@@ -672,8 +740,12 @@ impl<C: Connection + Clone + 'static> DeviceInterface for Device<C> {
 // ---------------------------------------------------------------------------
 
 pub(crate) struct Queue<C: Connection + Clone + 'static> {
-    #[allow(dead_code)]
     pub(crate) facade: Arc<FacadeQueue<C>>,
+    /// Monotonic submission counter — wgpu's `Queue::submit` returns this
+    /// as a `u64` opaque "submission index" that callers can later poll
+    /// against. We don't track real completion; this is enough for apps
+    /// that just want a unique increment per submit.
+    pub(crate) next_submission: std::sync::atomic::AtomicU64,
 }
 
 impl<C: Connection + Clone + 'static> std::fmt::Debug for Queue<C> {
@@ -685,11 +757,18 @@ impl<C: Connection + Clone + 'static> std::fmt::Debug for Queue<C> {
 impl<C: Connection + Clone + 'static> QueueInterface for Queue<C> {
     fn write_buffer(
         &self,
-        _buffer: &DispatchBuffer,
-        _offset: wgpu::wgt::BufferAddress,
-        _data: &[u8],
+        buffer: &DispatchBuffer,
+        offset: wgpu::wgt::BufferAddress,
+        data: &[u8],
     ) {
-        unimplemented!("Queue::write_buffer not yet implemented")
+        let buf = buffer
+            .as_custom::<Buffer<C>>()
+            .expect("Queue::write_buffer received a buffer from a different backend");
+        // The facade's write_buffer takes ownership of the bytes (via
+        // Bytes::copy_from_slice this round-trips through an Arc<Vec>).
+        // wgpu's interface gives us a borrow, so we have to copy.
+        self.facade
+            .write_buffer(&buf.facade, offset, bytes::Bytes::copy_from_slice(data));
     }
 
     fn create_staging_buffer(
@@ -729,9 +808,35 @@ impl<C: Connection + Clone + 'static> QueueInterface for Queue<C> {
 
     fn submit(
         &self,
-        _command_buffers: &mut dyn Iterator<Item = DispatchCommandBuffer>,
+        command_buffers: &mut dyn Iterator<Item = DispatchCommandBuffer>,
     ) -> u64 {
-        unimplemented!("Queue::submit not yet implemented")
+        // Drain the iterator into facade `CommandBuffer`s (the per-CB
+        // recordings live in our adapter; we hand them to the facade
+        // unchanged). The facade's `submit` is sync + fire-and-forget; the
+        // encoded recording is shipped on the multiplexed stream.
+        let recordings: Vec<wgpu_remote_client::CommandBuffer> = command_buffers
+            .map(|cb| {
+                let recorded = cb
+                    .as_custom::<CommandBuffer>()
+                    .expect("Queue::submit received a command buffer from a different backend");
+                wgpu_remote_client::CommandBuffer::from_recording(recorded.recording.clone())
+            })
+            .collect();
+
+        // submit() can fail at the bincode encode step. wgpu has no public
+        // path for surfacing such errors *from a custom backend* — its
+        // `Queue::submit` is sync and returns u64 unconditionally. Until
+        // we wire `on_uncaptured_error`, swallow with a panic so failures
+        // are at least loud.
+        self.facade
+            .submit(recordings)
+            .unwrap_or_else(|e| panic!("wgpu-remote-wgpu submit: {e}"));
+
+        // Synthesize a monotonic submission counter. wgpu uses this as a
+        // poll-target index; with no submission tracking on our side we
+        // keep an incrementing counter scoped to this queue.
+        self.next_submission
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     }
 
     fn get_timestamp_period(&self) -> f32 {
@@ -749,3 +854,677 @@ impl<C: Connection + Clone + 'static> QueueInterface for Queue<C> {
         unimplemented!("acceleration structures not supported by wgpu-remote")
     }
 }
+
+// ---------------------------------------------------------------------------
+// CommandEncoder + RenderPass + ComputePass + CommandBuffer
+// ---------------------------------------------------------------------------
+//
+// We deliberately *don't* delegate encoding to the facade's own
+// `CommandEncoder<C>`. The facade's encoder loans `&mut self` into its
+// pass types, which doesn't fit through wgpu's owned `DispatchRenderPass` /
+// `DispatchComputePass` model. Building a parallel accumulator using the
+// protocol's `CommandBufferRecording` directly is structurally simpler and
+// avoids needing an `Arc<Mutex<facade::CommandEncoder>>` around a type the
+// facade itself never wraps in one.
+//
+// On submission we still go through the facade's `Queue::submit`, which
+// handles encoding + the multiplexed-stream send.
+
+use std::sync::Mutex as StdMutex;
+use wgpu_remote_protocol::commands::{
+    CommandBufferRecording, ComputeCommand, EncoderCommand, RenderCommand,
+    RenderPassColorAttachment as ProtoColorAttachment,
+    RenderPassDepthStencilAttachment as ProtoDepthAttachment,
+};
+
+/// Generic over `<C>` even though the encoder itself doesn't hold a
+/// connection — the parameter is what lets the `CommandEncoderInterface`
+/// impl resolve `Buffer<C>`, `BindGroup<C>`, etc. for its `as_custom`
+/// extractions, and what makes wgpu's `as_custom::<CommandEncoder<C>>()`
+/// disambiguate per-connection-type.
+///
+/// State lives behind an `Arc<Inner>` so pass adapters can hold a
+/// back-reference and flush their accumulated commands on Drop.
+pub(crate) struct CommandEncoder<C: Connection + Clone + 'static> {
+    inner: Arc<EncoderInner<C>>,
+}
+
+struct EncoderInner<C: Connection + Clone + 'static> {
+    /// Mutex-wrapped because wgpu's `CommandEncoderInterface::finish`
+    /// takes `&mut self` but the rest of its methods are `&self`. Recording
+    /// into a `Vec` from `&self` requires interior mutability; we use the
+    /// same mutex for `finish` to take the recording out.
+    recording: StdMutex<CommandBufferRecording>,
+    _phantom: std::marker::PhantomData<fn() -> C>,
+}
+
+impl<C: Connection + Clone + 'static> CommandEncoder<C> {
+    fn new(label: Option<String>) -> Self {
+        Self {
+            inner: Arc::new(EncoderInner {
+                recording: StdMutex::new(CommandBufferRecording {
+                    label,
+                    commands: Vec::new(),
+                }),
+                _phantom: std::marker::PhantomData,
+            }),
+        }
+    }
+}
+
+impl<C: Connection + Clone + 'static> EncoderInner<C> {
+    fn push(&self, cmd: EncoderCommand) {
+        self.recording.lock().unwrap().commands.push(cmd);
+    }
+}
+
+impl<C: Connection + Clone + 'static> std::fmt::Debug for CommandEncoder<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("wgpu_remote_wgpu::CommandEncoder").finish_non_exhaustive()
+    }
+}
+
+impl<C: Connection + Clone + 'static> CommandEncoderInterface for CommandEncoder<C> {
+    fn copy_buffer_to_buffer(
+        &self,
+        source: &DispatchBuffer,
+        source_offset: wgpu::wgt::BufferAddress,
+        destination: &DispatchBuffer,
+        destination_offset: wgpu::wgt::BufferAddress,
+        copy_size: Option<wgpu::wgt::BufferAddress>,
+    ) {
+        let src = source
+            .as_custom::<Buffer<C>>()
+            .expect("copy_buffer_to_buffer: foreign source");
+        let dst = destination
+            .as_custom::<Buffer<C>>()
+            .expect("copy_buffer_to_buffer: foreign destination");
+        // wgpu allows None to mean "to end of source". The protocol wants
+        // an explicit size — fall back to source.size - source_offset.
+        let size = copy_size.unwrap_or_else(|| src.facade.size().saturating_sub(source_offset));
+        self.inner.push(EncoderCommand::CopyBufferToBuffer {
+            source: src.id(),
+            source_offset,
+            destination: dst.id(),
+            destination_offset,
+            size,
+        });
+    }
+
+    fn copy_buffer_to_texture(
+        &self,
+        _source: wgpu::TexelCopyBufferInfo<'_>,
+        _destination: wgpu::TexelCopyTextureInfo<'_>,
+        _copy_size: wgpu::wgt::Extent3d,
+    ) {
+        unimplemented!("copy_buffer_to_texture not yet wired through the wgpu drop-in")
+    }
+
+    fn copy_texture_to_buffer(
+        &self,
+        _source: wgpu::TexelCopyTextureInfo<'_>,
+        _destination: wgpu::TexelCopyBufferInfo<'_>,
+        _copy_size: wgpu::wgt::Extent3d,
+    ) {
+        unimplemented!("copy_texture_to_buffer not yet wired through the wgpu drop-in")
+    }
+
+    fn copy_texture_to_texture(
+        &self,
+        _source: wgpu::TexelCopyTextureInfo<'_>,
+        _destination: wgpu::TexelCopyTextureInfo<'_>,
+        _copy_size: wgpu::wgt::Extent3d,
+    ) {
+        unimplemented!("copy_texture_to_texture not yet wired through the wgpu drop-in")
+    }
+
+    fn begin_compute_pass(&self, desc: &wgpu::ComputePassDescriptor<'_>) -> DispatchComputePass {
+        DispatchComputePass::custom(ComputePass::<C>::new(
+            desc.label.map(str::to_owned),
+            Arc::clone(&self.inner),
+        ))
+    }
+
+    fn begin_render_pass(&self, desc: &wgpu::RenderPassDescriptor<'_>) -> DispatchRenderPass {
+        let color_attachments = desc
+            .color_attachments
+            .iter()
+            .map(|maybe| {
+                maybe.as_ref().map(|att| ProtoColorAttachment {
+                    view: att
+                        .view
+                        .as_custom::<TextureView<C>>()
+                        .expect("render pass color attachment: foreign view")
+                        .id(),
+                    depth_slice: att.depth_slice,
+                    resolve_target: att.resolve_target.as_ref().map(|v| {
+                        v.as_custom::<TextureView<C>>()
+                            .expect("render pass resolve target: foreign view")
+                            .id()
+                    }),
+                    ops: att.ops,
+                })
+            })
+            .collect();
+        let depth_stencil_attachment =
+            desc.depth_stencil_attachment.as_ref().map(|att| ProtoDepthAttachment {
+                view: att
+                    .view
+                    .as_custom::<TextureView<C>>()
+                    .expect("render pass depth attachment: foreign view")
+                    .id(),
+                depth_ops: att.depth_ops,
+                stencil_ops: att.stencil_ops,
+            });
+        DispatchRenderPass::custom(RenderPass::<C>::new(
+            desc.label.map(str::to_owned),
+            color_attachments,
+            depth_stencil_attachment,
+            Arc::clone(&self.inner),
+        ))
+    }
+
+    fn finish(&mut self) -> DispatchCommandBuffer {
+        // Take the recording out by swapping in an empty one. The encoder
+        // shouldn't be reused after finish, but if it is, recording into
+        // the empty replacement is a no-op as far as observable behavior.
+        let recording = std::mem::take(&mut *self.inner.recording.lock().unwrap());
+        DispatchCommandBuffer::custom(CommandBuffer { recording })
+    }
+
+    fn clear_texture(
+        &self,
+        _texture: &DispatchTexture,
+        _subresource_range: &wgpu::ImageSubresourceRange,
+    ) {
+        unimplemented!("clear_texture not yet wired through the wgpu drop-in")
+    }
+
+    fn clear_buffer(
+        &self,
+        buffer: &DispatchBuffer,
+        offset: wgpu::wgt::BufferAddress,
+        size: Option<wgpu::wgt::BufferAddress>,
+    ) {
+        let buf = buffer
+            .as_custom::<Buffer<C>>()
+            .expect("clear_buffer: foreign buffer");
+        self.inner.push(EncoderCommand::ClearBuffer {
+            buffer: buf.id(),
+            offset,
+            size,
+        });
+    }
+
+    fn insert_debug_marker(&self, _label: &str) {
+        // Debug markers are server-side observability; not bridged yet.
+    }
+
+    fn push_debug_group(&self, _label: &str) {}
+    fn pop_debug_group(&self) {}
+
+    fn write_timestamp(&self, _query_set: &DispatchQuerySet, _query_index: u32) {
+        unimplemented!("query sets not supported by wgpu-remote")
+    }
+
+    fn resolve_query_set(
+        &self,
+        _query_set: &DispatchQuerySet,
+        _first_query: u32,
+        _query_count: u32,
+        _destination: &DispatchBuffer,
+        _destination_offset: wgpu::wgt::BufferAddress,
+    ) {
+        unimplemented!("query sets not supported by wgpu-remote")
+    }
+
+    fn mark_acceleration_structures_built<'a>(
+        &self,
+        _blas: &mut dyn Iterator<Item = &'a wgpu::Blas>,
+        _tlas: &mut dyn Iterator<Item = &'a wgpu::Tlas>,
+    ) {
+        unimplemented!("acceleration structures not supported by wgpu-remote")
+    }
+
+    fn build_acceleration_structures<'a>(
+        &self,
+        _blas: &mut dyn Iterator<Item = &'a wgpu::BlasBuildEntry<'a>>,
+        _tlas: &mut dyn Iterator<Item = &'a wgpu::Tlas>,
+    ) {
+        unimplemented!("acceleration structures not supported by wgpu-remote")
+    }
+
+    fn transition_resources<'a>(
+        &mut self,
+        _buffer_transitions: &mut dyn Iterator<
+            Item = wgpu::wgt::BufferTransition<&'a DispatchBuffer>,
+        >,
+        _texture_transitions: &mut dyn Iterator<
+            Item = wgpu::wgt::TextureTransition<&'a DispatchTexture>,
+        >,
+    ) {
+        // Resource transitions are an explicit-control feature. The remote
+        // backend tracks transitions on the server; client-supplied hints
+        // are advisory. No-op for now.
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ComputePass adapter
+// ---------------------------------------------------------------------------
+//
+// Each pass holds its own command vec plus an `Arc<CommandEncoder<C>>`
+// pointing at the parent encoder. The wgpu public `RenderPass<'encoder>`
+// borrow lifetime guarantees the encoder outlives the pass on the
+// user-facing side, but at the dispatch layer we hold only owned types,
+// so we keep an Arc reference. Drop of the pass adapter pushes the
+// accumulated commands into the encoder's recording.
+
+pub(crate) struct ComputePass<C: Connection + Clone + 'static> {
+    label: Option<String>,
+    commands: Vec<ComputeCommand>,
+    parent: Arc<EncoderInner<C>>,
+}
+
+impl<C: Connection + Clone + 'static> ComputePass<C> {
+    fn new(label: Option<String>, parent: Arc<EncoderInner<C>>) -> Self {
+        Self {
+            label,
+            commands: Vec::new(),
+            parent,
+        }
+    }
+}
+
+impl<C: Connection + Clone + 'static> std::fmt::Debug for ComputePass<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("wgpu_remote_wgpu::ComputePass").finish_non_exhaustive()
+    }
+}
+
+impl<C: Connection + Clone + 'static> Drop for ComputePass<C> {
+    fn drop(&mut self) {
+        let label = self.label.take();
+        let commands = std::mem::take(&mut self.commands);
+        self.parent
+            .push(EncoderCommand::BeginComputePass { label, commands });
+    }
+}
+
+impl<C: Connection + Clone + 'static> ComputePassInterface for ComputePass<C> {
+    fn set_pipeline(&mut self, pipeline: &DispatchComputePipeline) {
+        let p = pipeline
+            .as_custom::<ComputePipeline<C>>()
+            .expect("ComputePass::set_pipeline: foreign pipeline");
+        self.commands.push(ComputeCommand::SetPipeline(p.id()));
+    }
+
+    fn set_bind_group(
+        &mut self,
+        index: u32,
+        bind_group: Option<&DispatchBindGroup>,
+        offsets: &[wgpu::wgt::DynamicOffset],
+    ) {
+        let bg = bind_group
+            .expect("ComputePass::set_bind_group: optional bind groups not yet supported")
+            .as_custom::<BindGroup<C>>()
+            .expect("ComputePass::set_bind_group: foreign bind group");
+        self.commands.push(ComputeCommand::SetBindGroup {
+            index,
+            group: bg.id(),
+            offsets: offsets.to_vec(),
+        });
+    }
+
+    fn set_push_constants(&mut self, _offset: u32, _data: &[u8]) {
+        unimplemented!("compute push constants not yet wired")
+    }
+
+    fn insert_debug_marker(&mut self, _label: &str) {}
+    fn push_debug_group(&mut self, _group_label: &str) {}
+    fn pop_debug_group(&mut self) {}
+
+    fn write_timestamp(&mut self, _query_set: &DispatchQuerySet, _query_index: u32) {
+        unimplemented!("query sets not supported by wgpu-remote")
+    }
+
+    fn begin_pipeline_statistics_query(
+        &mut self,
+        _query_set: &DispatchQuerySet,
+        _query_index: u32,
+    ) {
+        unimplemented!("query sets not supported by wgpu-remote")
+    }
+
+    fn end_pipeline_statistics_query(&mut self) {
+        unimplemented!("query sets not supported by wgpu-remote")
+    }
+
+    fn dispatch_workgroups(&mut self, x: u32, y: u32, z: u32) {
+        self.commands
+            .push(ComputeCommand::DispatchWorkgroups { x, y, z });
+    }
+
+    fn dispatch_workgroups_indirect(
+        &mut self,
+        indirect_buffer: &DispatchBuffer,
+        indirect_offset: wgpu::wgt::BufferAddress,
+    ) {
+        let buf = indirect_buffer
+            .as_custom::<Buffer<C>>()
+            .expect("dispatch_workgroups_indirect: foreign buffer");
+        self.commands
+            .push(ComputeCommand::DispatchWorkgroupsIndirect {
+                indirect_buffer: buf.id(),
+                indirect_offset,
+            });
+    }
+
+    fn end(&mut self) {
+        // No-op: pass commands flush back to the parent encoder via Drop.
+        // Calling `end()` early is a hint, not a requirement.
+    }
+}
+
+// ---------------------------------------------------------------------------
+// RenderPass adapter
+// ---------------------------------------------------------------------------
+
+pub(crate) struct RenderPass<C: Connection + Clone + 'static> {
+    label: Option<String>,
+    color_attachments: Vec<Option<ProtoColorAttachment>>,
+    depth_stencil_attachment: Option<ProtoDepthAttachment>,
+    commands: Vec<RenderCommand>,
+    parent: Arc<EncoderInner<C>>,
+}
+
+impl<C: Connection + Clone + 'static> RenderPass<C> {
+    fn new(
+        label: Option<String>,
+        color_attachments: Vec<Option<ProtoColorAttachment>>,
+        depth_stencil_attachment: Option<ProtoDepthAttachment>,
+        parent: Arc<EncoderInner<C>>,
+    ) -> Self {
+        Self {
+            label,
+            color_attachments,
+            depth_stencil_attachment,
+            commands: Vec::new(),
+            parent,
+        }
+    }
+}
+
+impl<C: Connection + Clone + 'static> std::fmt::Debug for RenderPass<C> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("wgpu_remote_wgpu::RenderPass").finish_non_exhaustive()
+    }
+}
+
+impl<C: Connection + Clone + 'static> Drop for RenderPass<C> {
+    fn drop(&mut self) {
+        let label = self.label.take();
+        let color_attachments = std::mem::take(&mut self.color_attachments);
+        let depth_stencil_attachment = self.depth_stencil_attachment.take();
+        let commands = std::mem::take(&mut self.commands);
+        self.parent.push(EncoderCommand::BeginRenderPass {
+            label,
+            color_attachments,
+            depth_stencil_attachment,
+            commands,
+        });
+    }
+}
+
+impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
+    fn set_pipeline(&mut self, pipeline: &DispatchRenderPipeline) {
+        let p = pipeline
+            .as_custom::<RenderPipeline<C>>()
+            .expect("RenderPass::set_pipeline: foreign pipeline");
+        self.commands.push(RenderCommand::SetPipeline(p.id()));
+    }
+
+    fn set_bind_group(
+        &mut self,
+        index: u32,
+        bind_group: Option<&DispatchBindGroup>,
+        offsets: &[wgpu::wgt::DynamicOffset],
+    ) {
+        let bg = bind_group
+            .expect("RenderPass::set_bind_group: optional bind groups not yet supported")
+            .as_custom::<BindGroup<C>>()
+            .expect("RenderPass::set_bind_group: foreign bind group");
+        self.commands.push(RenderCommand::SetBindGroup {
+            index,
+            group: bg.id(),
+            offsets: offsets.to_vec(),
+        });
+    }
+
+    fn set_index_buffer(
+        &mut self,
+        buffer: &DispatchBuffer,
+        index_format: wgpu::IndexFormat,
+        offset: wgpu::wgt::BufferAddress,
+        size: Option<wgpu::wgt::BufferSize>,
+    ) {
+        let buf = buffer
+            .as_custom::<Buffer<C>>()
+            .expect("set_index_buffer: foreign buffer");
+        self.commands.push(RenderCommand::SetIndexBuffer {
+            buffer: buf.id(),
+            format: index_format,
+            offset,
+            size: size.map(|s| s.get()),
+        });
+    }
+
+    fn set_vertex_buffer(
+        &mut self,
+        slot: u32,
+        buffer: &DispatchBuffer,
+        offset: wgpu::wgt::BufferAddress,
+        size: Option<wgpu::wgt::BufferSize>,
+    ) {
+        let buf = buffer
+            .as_custom::<Buffer<C>>()
+            .expect("set_vertex_buffer: foreign buffer");
+        self.commands.push(RenderCommand::SetVertexBuffer {
+            slot,
+            buffer: buf.id(),
+            offset,
+            size: size.map(|s| s.get()),
+        });
+    }
+
+    fn set_push_constants(&mut self, _stages: wgpu::ShaderStages, _offset: u32, _data: &[u8]) {
+        unimplemented!("render push constants not yet wired")
+    }
+
+    fn set_blend_constant(&mut self, _color: wgpu::Color) {
+        unimplemented!("set_blend_constant not yet wired")
+    }
+
+    fn set_scissor_rect(&mut self, _x: u32, _y: u32, _width: u32, _height: u32) {
+        unimplemented!("set_scissor_rect not yet wired")
+    }
+
+    fn set_viewport(
+        &mut self,
+        _x: f32,
+        _y: f32,
+        _width: f32,
+        _height: f32,
+        _min_depth: f32,
+        _max_depth: f32,
+    ) {
+        unimplemented!("set_viewport not yet wired")
+    }
+
+    fn set_stencil_reference(&mut self, _reference: u32) {
+        unimplemented!("set_stencil_reference not yet wired")
+    }
+
+    fn draw(&mut self, vertices: std::ops::Range<u32>, instances: std::ops::Range<u32>) {
+        self.commands.push(RenderCommand::Draw {
+            vertices,
+            instances,
+        });
+    }
+
+    fn draw_indexed(
+        &mut self,
+        indices: std::ops::Range<u32>,
+        base_vertex: i32,
+        instances: std::ops::Range<u32>,
+    ) {
+        self.commands.push(RenderCommand::DrawIndexed {
+            indices,
+            base_vertex,
+            instances,
+        });
+    }
+
+    fn draw_mesh_tasks(&mut self, _x: u32, _y: u32, _z: u32) {
+        unimplemented!("mesh shading not supported by wgpu-remote")
+    }
+
+    fn draw_indirect(
+        &mut self,
+        _indirect_buffer: &DispatchBuffer,
+        _indirect_offset: wgpu::wgt::BufferAddress,
+    ) {
+        unimplemented!("draw_indirect not yet wired")
+    }
+
+    fn draw_indexed_indirect(
+        &mut self,
+        _indirect_buffer: &DispatchBuffer,
+        _indirect_offset: wgpu::wgt::BufferAddress,
+    ) {
+        unimplemented!("draw_indexed_indirect not yet wired")
+    }
+
+    fn draw_mesh_tasks_indirect(
+        &mut self,
+        _indirect_buffer: &DispatchBuffer,
+        _indirect_offset: wgpu::wgt::BufferAddress,
+    ) {
+        unimplemented!("mesh shading not supported by wgpu-remote")
+    }
+
+    fn multi_draw_indirect(
+        &mut self,
+        _indirect_buffer: &DispatchBuffer,
+        _indirect_offset: wgpu::wgt::BufferAddress,
+        _count: u32,
+    ) {
+        unimplemented!("multi_draw_indirect not yet wired")
+    }
+
+    fn multi_draw_indexed_indirect(
+        &mut self,
+        _indirect_buffer: &DispatchBuffer,
+        _indirect_offset: wgpu::wgt::BufferAddress,
+        _count: u32,
+    ) {
+        unimplemented!("multi_draw_indexed_indirect not yet wired")
+    }
+
+    fn multi_draw_indirect_count(
+        &mut self,
+        _indirect_buffer: &DispatchBuffer,
+        _indirect_offset: wgpu::wgt::BufferAddress,
+        _count_buffer: &DispatchBuffer,
+        _count_buffer_offset: wgpu::wgt::BufferAddress,
+        _max_count: u32,
+    ) {
+        unimplemented!("multi_draw_indirect_count not yet wired")
+    }
+
+    fn multi_draw_mesh_tasks_indirect(
+        &mut self,
+        _indirect_buffer: &DispatchBuffer,
+        _indirect_offset: wgpu::wgt::BufferAddress,
+        _count: u32,
+    ) {
+        unimplemented!("mesh shading not supported by wgpu-remote")
+    }
+
+    fn multi_draw_indexed_indirect_count(
+        &mut self,
+        _indirect_buffer: &DispatchBuffer,
+        _indirect_offset: wgpu::wgt::BufferAddress,
+        _count_buffer: &DispatchBuffer,
+        _count_buffer_offset: wgpu::wgt::BufferAddress,
+        _max_count: u32,
+    ) {
+        unimplemented!("multi_draw_indexed_indirect_count not yet wired")
+    }
+
+    fn multi_draw_mesh_tasks_indirect_count(
+        &mut self,
+        _indirect_buffer: &DispatchBuffer,
+        _indirect_offset: wgpu::wgt::BufferAddress,
+        _count_buffer: &DispatchBuffer,
+        _count_buffer_offset: wgpu::wgt::BufferAddress,
+        _max_count: u32,
+    ) {
+        unimplemented!("mesh shading not supported by wgpu-remote")
+    }
+
+    fn insert_debug_marker(&mut self, _label: &str) {}
+    fn push_debug_group(&mut self, _group_label: &str) {}
+    fn pop_debug_group(&mut self) {}
+
+    fn write_timestamp(&mut self, _query_set: &DispatchQuerySet, _query_index: u32) {
+        unimplemented!("query sets not supported by wgpu-remote")
+    }
+
+    fn begin_occlusion_query(&mut self, _query_index: u32) {
+        unimplemented!("occlusion queries not yet wired")
+    }
+
+    fn end_occlusion_query(&mut self) {
+        unimplemented!("occlusion queries not yet wired")
+    }
+
+    fn begin_pipeline_statistics_query(
+        &mut self,
+        _query_set: &DispatchQuerySet,
+        _query_index: u32,
+    ) {
+        unimplemented!("pipeline statistics queries not yet wired")
+    }
+
+    fn end_pipeline_statistics_query(&mut self) {
+        unimplemented!("pipeline statistics queries not yet wired")
+    }
+
+    fn execute_bundles(
+        &mut self,
+        _render_bundles: &mut dyn Iterator<Item = &DispatchRenderBundle>,
+    ) {
+        unimplemented!("render bundles not supported by wgpu-remote")
+    }
+
+    fn end(&mut self) {
+        // No-op: see ComputePass::end.
+    }
+}
+
+// ---------------------------------------------------------------------------
+// CommandBuffer adapter (just a recording owner)
+// ---------------------------------------------------------------------------
+
+pub(crate) struct CommandBuffer {
+    pub(crate) recording: CommandBufferRecording,
+}
+
+impl std::fmt::Debug for CommandBuffer {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("wgpu_remote_wgpu::CommandBuffer").finish_non_exhaustive()
+    }
+}
+
+impl CommandBufferInterface for CommandBuffer {}
