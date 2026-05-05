@@ -292,3 +292,98 @@ async fn wgpu_drop_in_compute_double() -> anyhow::Result<()> {
     drop(server);
     Ok(())
 }
+
+/// Unsupported-feature methods route through `Device::on_uncaptured_error`
+/// instead of panicking, so apps can decide to log + degrade rather than
+/// crash. Verify by registering a handler and triggering one.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn unsupported_feature_routes_through_error_handler() -> anyhow::Result<()> {
+    let (client_conn, server_conn) = pair();
+
+    let engine = std::sync::Arc::new(Engine::new().await?);
+    let server = tokio::spawn(async move {
+        run_connection(engine, server_conn).await.unwrap();
+    });
+
+    let instance = wgpu_remote_wgpu::install(client_conn);
+    let adapter = instance
+        .request_adapter(&wgpu::RequestAdapterOptions::default())
+        .await?;
+    let (device, _queue) = adapter
+        .request_device(&wgpu::DeviceDescriptor::default())
+        .await?;
+
+    // Register a handler that records every error it receives.
+    let captured = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+    let captured_for_handler = std::sync::Arc::clone(&captured);
+    device.on_uncaptured_error(std::sync::Arc::new(move |err: wgpu::Error| {
+        captured_for_handler
+            .lock()
+            .unwrap()
+            .push(err.to_string());
+    }));
+
+    // Trigger an unsupported feature: a render pass with multi_draw_indirect.
+    // We need a render pipeline + buffer to hold the indirect args; the
+    // simplest setup is a dummy fragment-only pipeline + a no-op buffer.
+    //
+    // Actually the simplest path: just begin a render pass on a 1x1
+    // texture and call multi_draw_indirect on it. The protocol won't
+    // execute the recorded command (since the recording only goes to the
+    // server on submit, and we won't submit), but the dispatch-side error
+    // handler should fire synchronously when multi_draw_indirect is
+    // recorded.
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("dummy_rt"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        view_formats: &[],
+    });
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+
+    let indirect_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("indirect"),
+        size: 16,
+        usage: wgpu::BufferUsages::INDIRECT,
+        mapped_at_creation: false,
+    });
+
+    let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
+    {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: None,
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations::default(),
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+        });
+        // multi_draw_indirect routes through the unsupported-error path.
+        pass.multi_draw_indirect(&indirect_buffer, 0, 4);
+    }
+    // Don't submit — we only care that the error handler fired during
+    // recording.
+
+    let errs = captured.lock().unwrap().clone();
+    assert_eq!(errs.len(), 1, "expected exactly one error, got {errs:?}");
+    assert!(
+        errs[0].contains("multi-draw"),
+        "unexpected error message: {}",
+        errs[0]
+    );
+
+    drop(server);
+    Ok(())
+}

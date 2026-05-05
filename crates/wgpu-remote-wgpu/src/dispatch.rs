@@ -178,12 +178,15 @@ impl<C: Connection + Clone + 'static> AdapterInterface for Adapter<C> {
 
             let device = Arc::new(device);
             let queue = Arc::new(queue);
+            let error_handler = ErrorReporter::new();
             Ok((
                 DispatchDevice::custom(Device {
                     facade: Arc::clone(&device),
+                    error_handler: error_handler.clone(),
                 }),
                 DispatchQueue::custom(Queue {
                     facade: Arc::clone(&queue),
+                    error_handler,
                     next_submission: std::sync::atomic::AtomicU64::new(1),
                 }),
             ))
@@ -515,9 +518,76 @@ impl<C: Connection + Clone + 'static> TextureInterface for Texture<C> {
 // ---------------------------------------------------------------------------
 
 pub(crate) struct Device<C: Connection + Clone + 'static> {
-    #[allow(dead_code)]
     pub(crate) facade: Arc<FacadeDevice<C>>,
+    /// Where uncaptured validation errors go. Updated by
+    /// `Device::on_uncaptured_error`. Default behavior matches wgpu's
+    /// documented contract: errors translate into panics.
+    pub(crate) error_handler: ErrorReporter,
 }
+
+/// Shared handle to the user-installed uncaptured-error handler. Cloned
+/// into anything that needs to report unsupported-feature errors —
+/// command encoders, passes — so they don't all need a back-reference to
+/// the device.
+#[derive(Clone)]
+pub(crate) struct ErrorReporter {
+    handler: Arc<StdMutex<Option<Arc<dyn wgpu::UncapturedErrorHandler>>>>,
+}
+
+impl ErrorReporter {
+    pub(crate) fn new() -> Self {
+        Self {
+            handler: Arc::new(StdMutex::new(None)),
+        }
+    }
+
+    fn install(&self, handler: Arc<dyn wgpu::UncapturedErrorHandler>) {
+        *self.handler.lock().unwrap() = Some(handler);
+    }
+
+    /// Report an unsupported-feature use to the installed handler. If no
+    /// handler is installed, panic — that's wgpu's documented default for
+    /// uncaptured errors.
+    pub(crate) fn report_unsupported(&self, what: &str) {
+        let description = format!("wgpu-remote does not support {what}");
+        self.report(wgpu::Error::Validation {
+            source: Box::new(UnsupportedError(description.clone())),
+            description,
+        });
+    }
+
+    /// Route a fully-formed wgpu::Error through the installed handler,
+    /// or panic if none is installed.
+    pub(crate) fn report(&self, err: wgpu::Error) {
+        let handler = self.handler.lock().unwrap().clone();
+        match handler {
+            Some(h) => h(err),
+            None => panic!("uncaptured wgpu error: {err}"),
+        }
+    }
+}
+
+#[derive(Debug)]
+struct UnsupportedError(String);
+
+impl std::fmt::Display for UnsupportedError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for UnsupportedError {}
+
+#[derive(Debug)]
+struct SubmitError(String);
+
+impl std::fmt::Display for SubmitError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SubmitError {}
 
 impl<C: Connection + Clone + 'static> std::fmt::Debug for Device<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -677,7 +747,10 @@ impl<C: Connection + Clone + 'static> DeviceInterface for Device<C> {
         &self,
         desc: &wgpu::CommandEncoderDescriptor<'_>,
     ) -> DispatchCommandEncoder {
-        DispatchCommandEncoder::custom(CommandEncoder::<C>::new(desc.label.map(str::to_owned)))
+        DispatchCommandEncoder::custom(CommandEncoder::<C>::new(
+            desc.label.map(str::to_owned),
+            self.error_handler.clone(),
+        ))
     }
 
     fn create_render_bundle_encoder(
@@ -691,8 +764,8 @@ impl<C: Connection + Clone + 'static> DeviceInterface for Device<C> {
         // No-op until we wire the connection-loss path through to wgpu.
     }
 
-    fn on_uncaptured_error(&self, _handler: Arc<dyn wgpu::UncapturedErrorHandler>) {
-        // No-op until NotSupported error routing lands.
+    fn on_uncaptured_error(&self, handler: Arc<dyn wgpu::UncapturedErrorHandler>) {
+        self.error_handler.install(handler);
     }
 
     fn push_error_scope(&self, _filter: wgpu::ErrorFilter) {
@@ -741,6 +814,7 @@ impl<C: Connection + Clone + 'static> DeviceInterface for Device<C> {
 
 pub(crate) struct Queue<C: Connection + Clone + 'static> {
     pub(crate) facade: Arc<FacadeQueue<C>>,
+    pub(crate) error_handler: ErrorReporter,
     /// Monotonic submission counter — wgpu's `Queue::submit` returns this
     /// as a `u64` opaque "submission index" that callers can later poll
     /// against. We don't track real completion; this is enough for apps
@@ -793,7 +867,12 @@ impl<C: Connection + Clone + 'static> QueueInterface for Queue<C> {
         _offset: wgpu::wgt::BufferAddress,
         _staging_buffer: &DispatchQueueWriteBuffer,
     ) {
-        unimplemented!("staging buffer writes not yet implemented")
+        // create_staging_buffer always returns None, so no caller should
+        // ever hand us a real DispatchQueueWriteBuffer. If they do, that's
+        // a wgpu-remote misuse rather than an unsupported-feature error.
+        unimplemented!(
+            "write_staging_buffer is unreachable: create_staging_buffer always returns None"
+        )
     }
 
     fn write_texture(
@@ -803,7 +882,11 @@ impl<C: Connection + Clone + 'static> QueueInterface for Queue<C> {
         _data_layout: wgpu::wgt::TexelCopyBufferLayout,
         _size: wgpu::wgt::Extent3d,
     ) {
-        unimplemented!("Queue::write_texture not yet implemented")
+        // Queue::write_texture is in WebGPU's standard surface — apps
+        // can't degrade around its absence. Until the protocol carries
+        // texture writes, leave as a not-yet-wired marker (distinct
+        // from "unsupported" which routes through the error handler).
+        unimplemented!("Queue::write_texture not yet wired through wgpu-remote-wgpu")
     }
 
     fn submit(
@@ -823,14 +906,21 @@ impl<C: Connection + Clone + 'static> QueueInterface for Queue<C> {
             })
             .collect();
 
-        // submit() can fail at the bincode encode step. wgpu has no public
-        // path for surfacing such errors *from a custom backend* — its
-        // `Queue::submit` is sync and returns u64 unconditionally. Until
-        // we wire `on_uncaptured_error`, swallow with a panic so failures
-        // are at least loud.
-        self.facade
-            .submit(recordings)
-            .unwrap_or_else(|e| panic!("wgpu-remote-wgpu submit: {e}"));
+        // submit() can fail at the bincode encode step. wgpu's
+        // `Queue::submit` is sync and returns u64 unconditionally — we
+        // can't surface the error in the return value. Route through the
+        // installed uncaptured-error handler instead. The submission has
+        // not occurred; the caller will likely dispatch follow-on work
+        // referencing the (uncreated) submission index, which will then
+        // also surface as a server-side `UnknownResource` and propagate
+        // back through the error channel.
+        if let Err(e) = self.facade.submit(recordings) {
+            let description = format!("Queue::submit failed: {e}");
+            self.error_handler.report(wgpu::Error::Internal {
+                source: Box::new(SubmitError(description.clone())),
+                description,
+            });
+        }
 
         // Synthesize a monotonic submission counter. wgpu uses this as a
         // poll-target index; with no submission tracking on our side we
@@ -851,6 +941,8 @@ impl<C: Connection + Clone + 'static> QueueInterface for Queue<C> {
     }
 
     fn compact_blas(&self, _blas: &DispatchBlas) -> (Option<u64>, DispatchBlas) {
+        // BLAS adapters are unconstructible in this build (`create_blas`
+        // panics), so this is unreachable in practice. Keep the panic.
         unimplemented!("acceleration structures not supported by wgpu-remote")
     }
 }
@@ -895,17 +987,22 @@ struct EncoderInner<C: Connection + Clone + 'static> {
     /// into a `Vec` from `&self` requires interior mutability; we use the
     /// same mutex for `finish` to take the recording out.
     recording: StdMutex<CommandBufferRecording>,
+    /// Cloned from the parent device. Pass adapters reach this via their
+    /// `Arc<EncoderInner<C>>` parent reference and use it to report
+    /// unsupported-feature uses.
+    error_handler: ErrorReporter,
     _phantom: std::marker::PhantomData<fn() -> C>,
 }
 
 impl<C: Connection + Clone + 'static> CommandEncoder<C> {
-    fn new(label: Option<String>) -> Self {
+    fn new(label: Option<String>, error_handler: ErrorReporter) -> Self {
         Self {
             inner: Arc::new(EncoderInner {
                 recording: StdMutex::new(CommandBufferRecording {
                     label,
                     commands: Vec::new(),
                 }),
+                error_handler,
                 _phantom: std::marker::PhantomData,
             }),
         }
@@ -1083,7 +1180,9 @@ impl<C: Connection + Clone + 'static> CommandEncoderInterface for CommandEncoder
         _blas: &mut dyn Iterator<Item = &'a wgpu::Blas>,
         _tlas: &mut dyn Iterator<Item = &'a wgpu::Tlas>,
     ) {
-        unimplemented!("acceleration structures not supported by wgpu-remote")
+        self.inner
+            .error_handler
+            .report_unsupported("acceleration structures");
     }
 
     fn build_acceleration_structures<'a>(
@@ -1091,7 +1190,9 @@ impl<C: Connection + Clone + 'static> CommandEncoderInterface for CommandEncoder
         _blas: &mut dyn Iterator<Item = &'a wgpu::BlasBuildEntry<'a>>,
         _tlas: &mut dyn Iterator<Item = &'a wgpu::Tlas>,
     ) {
-        unimplemented!("acceleration structures not supported by wgpu-remote")
+        self.inner
+            .error_handler
+            .report_unsupported("acceleration structures");
     }
 
     fn transition_resources<'a>(
@@ -1185,7 +1286,9 @@ impl<C: Connection + Clone + 'static> ComputePassInterface for ComputePass<C> {
     fn pop_debug_group(&mut self) {}
 
     fn write_timestamp(&mut self, _query_set: &DispatchQuerySet, _query_index: u32) {
-        unimplemented!("query sets not supported by wgpu-remote")
+        // QuerySet adapters are unconstructible (create_query_set panics),
+        // so this is unreachable in practice.
+        self.parent.error_handler.report_unsupported("query sets");
     }
 
     fn begin_pipeline_statistics_query(
@@ -1193,11 +1296,11 @@ impl<C: Connection + Clone + 'static> ComputePassInterface for ComputePass<C> {
         _query_set: &DispatchQuerySet,
         _query_index: u32,
     ) {
-        unimplemented!("query sets not supported by wgpu-remote")
+        self.parent.error_handler.report_unsupported("query sets");
     }
 
     fn end_pipeline_statistics_query(&mut self) {
-        unimplemented!("query sets not supported by wgpu-remote")
+        self.parent.error_handler.report_unsupported("query sets");
     }
 
     fn dispatch_workgroups(&mut self, x: u32, y: u32, z: u32) {
@@ -1386,7 +1489,7 @@ impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
     }
 
     fn draw_mesh_tasks(&mut self, _x: u32, _y: u32, _z: u32) {
-        unimplemented!("mesh shading not supported by wgpu-remote")
+        self.parent.error_handler.report_unsupported("mesh shading");
     }
 
     fn draw_indirect(
@@ -1394,7 +1497,9 @@ impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
         _indirect_buffer: &DispatchBuffer,
         _indirect_offset: wgpu::wgt::BufferAddress,
     ) {
-        unimplemented!("draw_indirect not yet wired")
+        // Indirect draws are part of stock WebGPU. Not unsupported in
+        // principle — just not yet wired through the protocol.
+        unimplemented!("draw_indirect not yet wired through wgpu-remote-wgpu")
     }
 
     fn draw_indexed_indirect(
@@ -1402,7 +1507,7 @@ impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
         _indirect_buffer: &DispatchBuffer,
         _indirect_offset: wgpu::wgt::BufferAddress,
     ) {
-        unimplemented!("draw_indexed_indirect not yet wired")
+        unimplemented!("draw_indexed_indirect not yet wired through wgpu-remote-wgpu")
     }
 
     fn draw_mesh_tasks_indirect(
@@ -1410,7 +1515,7 @@ impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
         _indirect_buffer: &DispatchBuffer,
         _indirect_offset: wgpu::wgt::BufferAddress,
     ) {
-        unimplemented!("mesh shading not supported by wgpu-remote")
+        self.parent.error_handler.report_unsupported("mesh shading");
     }
 
     fn multi_draw_indirect(
@@ -1419,7 +1524,7 @@ impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
         _indirect_offset: wgpu::wgt::BufferAddress,
         _count: u32,
     ) {
-        unimplemented!("multi_draw_indirect not yet wired")
+        self.parent.error_handler.report_unsupported("multi-draw");
     }
 
     fn multi_draw_indexed_indirect(
@@ -1428,7 +1533,7 @@ impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
         _indirect_offset: wgpu::wgt::BufferAddress,
         _count: u32,
     ) {
-        unimplemented!("multi_draw_indexed_indirect not yet wired")
+        self.parent.error_handler.report_unsupported("multi-draw");
     }
 
     fn multi_draw_indirect_count(
@@ -1439,7 +1544,9 @@ impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
         _count_buffer_offset: wgpu::wgt::BufferAddress,
         _max_count: u32,
     ) {
-        unimplemented!("multi_draw_indirect_count not yet wired")
+        self.parent
+            .error_handler
+            .report_unsupported("multi-draw-count");
     }
 
     fn multi_draw_mesh_tasks_indirect(
@@ -1448,7 +1555,7 @@ impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
         _indirect_offset: wgpu::wgt::BufferAddress,
         _count: u32,
     ) {
-        unimplemented!("mesh shading not supported by wgpu-remote")
+        self.parent.error_handler.report_unsupported("mesh shading");
     }
 
     fn multi_draw_indexed_indirect_count(
@@ -1459,7 +1566,9 @@ impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
         _count_buffer_offset: wgpu::wgt::BufferAddress,
         _max_count: u32,
     ) {
-        unimplemented!("multi_draw_indexed_indirect_count not yet wired")
+        self.parent
+            .error_handler
+            .report_unsupported("multi-draw-count");
     }
 
     fn multi_draw_mesh_tasks_indirect_count(
@@ -1470,7 +1579,7 @@ impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
         _count_buffer_offset: wgpu::wgt::BufferAddress,
         _max_count: u32,
     ) {
-        unimplemented!("mesh shading not supported by wgpu-remote")
+        self.parent.error_handler.report_unsupported("mesh shading");
     }
 
     fn insert_debug_marker(&mut self, _label: &str) {}
@@ -1478,15 +1587,19 @@ impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
     fn pop_debug_group(&mut self) {}
 
     fn write_timestamp(&mut self, _query_set: &DispatchQuerySet, _query_index: u32) {
-        unimplemented!("query sets not supported by wgpu-remote")
+        self.parent.error_handler.report_unsupported("query sets");
     }
 
     fn begin_occlusion_query(&mut self, _query_index: u32) {
-        unimplemented!("occlusion queries not yet wired")
+        self.parent
+            .error_handler
+            .report_unsupported("occlusion queries");
     }
 
     fn end_occlusion_query(&mut self) {
-        unimplemented!("occlusion queries not yet wired")
+        self.parent
+            .error_handler
+            .report_unsupported("occlusion queries");
     }
 
     fn begin_pipeline_statistics_query(
@@ -1494,18 +1607,26 @@ impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
         _query_set: &DispatchQuerySet,
         _query_index: u32,
     ) {
-        unimplemented!("pipeline statistics queries not yet wired")
+        self.parent
+            .error_handler
+            .report_unsupported("pipeline statistics queries");
     }
 
     fn end_pipeline_statistics_query(&mut self) {
-        unimplemented!("pipeline statistics queries not yet wired")
+        self.parent
+            .error_handler
+            .report_unsupported("pipeline statistics queries");
     }
 
     fn execute_bundles(
         &mut self,
         _render_bundles: &mut dyn Iterator<Item = &DispatchRenderBundle>,
     ) {
-        unimplemented!("render bundles not supported by wgpu-remote")
+        // RenderBundle adapters are unconstructible (create_render_bundle_encoder
+        // panics), so this is unreachable in practice.
+        self.parent
+            .error_handler
+            .report_unsupported("render bundles");
     }
 
     fn end(&mut self) {
