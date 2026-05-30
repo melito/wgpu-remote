@@ -7,9 +7,8 @@
 //!     to a staging buffer, write out as a PPM (P6) image. The marquee
 //!     visual demo for the render path.
 //!
-//! In v1 the server uses a self-signed cert that the client must pin via
-//! `--cert <PATH>`. The DER file is whatever `wgpu-remote-server` writes via
-//! `--cert-out`.
+//! The client trusts the CA cert (or a self-signed server cert in legacy mode)
+//! supplied via `--ca-cert` (or its alias `--cert`).
 
 use std::net::SocketAddr;
 use std::num::NonZeroU64;
@@ -40,7 +39,9 @@ SUBCOMMANDS:
 
 COMMON OPTIONS:
     --server <ADDR>    Server address  [default: 127.0.0.1:4433]
-    --cert <PATH>      Path to the server's DER cert  [default: ./server-cert.der]
+    --ca-cert <PATH>   Path to the CA cert (DER) — or a self-signed server
+                       cert for legacy mode  [default: ./ca-cert.der]
+    --cert <PATH>      Alias for --ca-cert
     --server-name <S>  Server name to verify against the cert  [default: localhost]
     -h, --help         Print this help
 
@@ -58,7 +59,7 @@ COMMON OPTIONS:
 #[derive(Debug)]
 struct Common {
     server: SocketAddr,
-    cert: PathBuf,
+    ca_cert: PathBuf,
     server_name: String,
 }
 
@@ -90,7 +91,7 @@ fn parse_args() -> Result<Cmd, String> {
     }
 
     let mut server: SocketAddr = "127.0.0.1:4433".parse().unwrap();
-    let mut cert = PathBuf::from("./server-cert.der");
+    let mut ca_cert = PathBuf::from("./ca-cert.der");
     let mut server_name = "localhost".to_string();
     let mut count: u32 = 8;
     let mut width: u32 = 256;
@@ -101,7 +102,7 @@ fn parse_args() -> Result<Cmd, String> {
     while let Some(arg) = argv.next() {
         match arg.as_str() {
             "--server" => server = argv.next().ok_or("--server needs a value")?.parse().map_err(|e| format!("invalid --server: {e}"))?,
-            "--cert" => cert = PathBuf::from(argv.next().ok_or("--cert needs a value")?),
+            "--ca-cert" | "--cert" => ca_cert = PathBuf::from(argv.next().ok_or("--ca-cert needs a value")?),
             "--server-name" => server_name = argv.next().ok_or("--server-name needs a value")?,
             "--count" => count = argv.next().ok_or("--count needs a value")?.parse().map_err(|e| format!("invalid --count: {e}"))?,
             "--width" => width = argv.next().ok_or("--width needs a value")?.parse().map_err(|e| format!("invalid --width: {e}"))?,
@@ -118,7 +119,7 @@ fn parse_args() -> Result<Cmd, String> {
 
     let common = Common {
         server,
-        cert,
+        ca_cert,
         server_name,
     };
     Ok(match sub.as_str() {
@@ -167,8 +168,8 @@ async fn real_main() -> anyhow::Result<()> {
 }
 
 async fn connect(c: &Common) -> anyhow::Result<wgpu_remote_transport::quic::QuicConnection> {
-    let cert_bytes = std::fs::read(&c.cert)
-        .map_err(|e| anyhow::anyhow!("read cert {}: {e}", c.cert.display()))?;
+    let cert_bytes = std::fs::read(&c.ca_cert)
+        .map_err(|e| anyhow::anyhow!("read cert {}: {e}", c.ca_cert.display()))?;
     let endpoint = QuicEndpoint::client(CertificateDer::from(cert_bytes))?;
     let connection = endpoint.connect(c.server, &c.server_name).await?;
     // Leak the endpoint so the connection stays alive past this fn — we hand

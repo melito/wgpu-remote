@@ -11,6 +11,8 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite};
 
 #[cfg(feature = "quic")]
+pub mod pki;
+#[cfg(feature = "quic")]
 pub mod quic;
 
 /// Read one length-prefixed frame from `r` and return the *full* bytes

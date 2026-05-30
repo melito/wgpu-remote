@@ -16,26 +16,32 @@ This is a research prototype — see *Status* below for what's implemented.
 # Build everything
 cargo build --release
 
+# One-time: generate a private CA
+./target/release/wgpu-remote-server init-ca \
+    --ca-cert /tmp/wgpu-remote-ca.der \
+    --ca-key  /tmp/wgpu-remote-ca.key
+
 # Terminal 1: start the server (binds 0.0.0.0:4433 by default)
 ./target/release/wgpu-remote-server \
     --bind 127.0.0.1:4433 \
-    --cert-out /tmp/wgpu-remote-cert.der
+    --ca-cert /tmp/wgpu-remote-ca.der \
+    --ca-key  /tmp/wgpu-remote-ca.key
 
 # Terminal 2: ping it
 ./target/release/wgpu-remote-cli ping \
     --server 127.0.0.1:4433 \
-    --cert /tmp/wgpu-remote-cert.der
+    --ca-cert /tmp/wgpu-remote-ca.der
 
 # Terminal 2: run a real compute workload
 ./target/release/wgpu-remote-cli compute-double \
     --server 127.0.0.1:4433 \
-    --cert /tmp/wgpu-remote-cert.der \
+    --ca-cert /tmp/wgpu-remote-ca.der \
     --count 16
 
 # Terminal 2: render an actual image
 ./target/release/wgpu-remote-cli render-checkerboard \
     --server 127.0.0.1:4433 \
-    --cert /tmp/wgpu-remote-cert.der \
+    --ca-cert /tmp/wgpu-remote-ca.der \
     --width 512 --height 512 --tile 64 \
     --output /tmp/checker.ppm
 open /tmp/checker.ppm   # macOS; xdg-open elsewhere
@@ -45,7 +51,7 @@ open /tmp/checker.ppm   # macOS; xdg-open elsewhere
 
 `render-checkerboard` allocates a render-target texture, runs a fragment shader that paints a checkerboard pattern, copies the texture to a staging buffer, reads it back, and writes a PPM image you can open in any viewer.
 
-Every step crosses the QUIC connection. For multi-machine use, copy `/tmp/wgpu-remote-cert.der` to the client side; it's regenerated on every server start.
+Every step crosses the QUIC connection. For multi-machine use, copy the CA cert to the client side. Unlike the old self-signed flow, the CA cert is stable — server certs can rotate on every restart without redistributing trust anchors.
 
 ## Architecture
 
@@ -99,13 +105,45 @@ We use the seam Firefox uses for its content↔GPU process bridge: serialize at 
 | Crate                          | Purpose |
 |--------------------------------|---------|
 | `wgpu-remote-protocol`         | Wire format. Action/Response enums, typed IDs, descriptor mirrors, length-delimited bincode codec. No I/O. |
-| `wgpu-remote-transport`        | `Transport` + `Connection` traits. quinn-based QUIC implementation. |
+| `wgpu-remote-transport`        | `Transport` + `Connection` traits, quinn-based QUIC implementation, private CA (`pki` module). |
 | `wgpu-remote-transport-iroh`   | iroh adapter (stub — v1.1). |
 | `wgpu-remote-server`           | Replay engine + server binary. |
 | `wgpu-remote-client`           | Low-level `Client` + wgpu-shaped facade (`Instance`, `Device`, etc.). |
 | `wgpu-remote-wgpu`             | True drop-in for stock `wgpu`: `install(connection) -> wgpu::Instance`. |
 | `wgpu-remote-cli`              | Demo / smoke-test CLI. |
 | `wgpu-remote-tests`            | End-to-end tests. |
+
+## Certificate management
+
+The server uses a private CA to issue short-lived server certificates.
+Clients pin the CA cert, so server certs can rotate freely.
+
+```bash
+# Generate a CA (once, keep the key secret)
+wgpu-remote-server init-ca --ca-cert ca-cert.der --ca-key ca-key.der
+
+# Start the server — it loads the CA and issues its own server cert
+wgpu-remote-server --ca-cert ca-cert.der --ca-key ca-key.der
+
+# If no CA files exist, the server auto-generates one on first start
+wgpu-remote-server   # creates ./ca-cert.der + ./ca-key.der
+
+# For quick testing, --self-signed skips the CA entirely (old v0 behavior)
+wgpu-remote-server --self-signed --cert-out server-cert.der
+```
+
+The server cert includes `localhost` as a SAN by default. Add more with
+`--san`:
+
+```bash
+wgpu-remote-server --ca-cert ca.der --ca-key ca.key \
+    --bind 0.0.0.0:4433 \
+    --san my-gpu-box.local \
+    --san 192.168.1.42
+```
+
+For multi-machine use, copy `ca-cert.der` to the client machine. The CA
+key never leaves the server.
 
 ## Using as a wgpu drop-in
 
@@ -118,8 +156,8 @@ types, no `<C>` generic, no facade-specific APIs. Built on wgpu 27's
 use rustls::pki_types::CertificateDer;
 use wgpu_remote_transport::quic::QuicEndpoint;
 
-let cert = CertificateDer::from(std::fs::read("server-cert.der")?);
-let endpoint = QuicEndpoint::client(cert)?;
+let ca_cert = CertificateDer::from(std::fs::read("ca-cert.der")?);
+let endpoint = QuicEndpoint::client(ca_cert)?;
 let connection = endpoint.connect(addr, "localhost").await?;
 
 let instance: wgpu::Instance = wgpu_remote_wgpu::install(connection);
@@ -189,7 +227,8 @@ the two shipping transports.
 - `copy_buffer_to_buffer`, `copy_texture_to_buffer`, `copy_buffer_to_texture`
 - Queue submit + `write_buffer`
 - Unsupported-feature errors routed through `Device::on_uncaptured_error`
-- Cross-process / cross-machine over QUIC with self-signed cert pinning
+- Private CA for cert management (`CertAuthority` + `init-ca` subcommand)
+- Cross-process / cross-machine over QUIC with CA-signed or self-signed certs
 
 **Not yet** (v1.2+):
 - Drop-in for stock wgpu *render* path (encoder/render-pass surface area
@@ -198,7 +237,7 @@ the two shipping transports.
 - SPIR-V / GLSL shader sources (WGSL only)
 - Multi-client session scoping (currently one shared engine = one shared GPU device)
 - iroh transport (NodeId / hole-punch / relay)
-- Real PKI flow for cert provisioning
+- mTLS client authentication (CA-signed client certs)
 - Compressed texture formats and acceleration structures
 
 **Probably never** (out of scope unless someone needs it):
@@ -220,6 +259,7 @@ Notable end-to-end tests:
 | `engine_buffer / engine_compute`                    | Engine dispatches against a real GPU.                                                                                                |
 | `quic_compute`                                      | Same workload over real QUIC, in-process.                                                                                            |
 | `spawn_binary::binary_compute_double`               | Spawns the actual server binary, runs the workload over a real socket — proves the architecture works across an OS process boundary. |
+| `spawn_binary::binary_handshake_ca`                 | Spawns the server in CA mode — proves the CA → server cert → client trust chain works across a process boundary.                    |
 | `facade_compute_double`                             | The compute workload using only wgpu-shaped facade types — no `Action` enum visible.                                                 |
 | `facade_render_to_texture`                          | Same shape but for the render path: fragment shader → texture → readback → per-pixel assertion.                                      |
 | `wgpu_drop_in_compute_double`                       | The compute workload using only `wgpu::*` types via `wgpu_remote_wgpu::install` — the drop-in milestone.                             |
@@ -232,8 +272,8 @@ Notable end-to-end tests:
    Each is a small protocol addition + a small dispatch-side rewrite.
 2. iroh transport — laptop ↔ home-GPU NAT-traversed scenario.
 3. Per-connection session scoping in the server (so multiple clients don't share an ID namespace).
-4. SPIR-V / GLSL shader source variants on the wire.
-5. Real PKI flow for QUIC cert provisioning.
+4. mTLS client authentication — CA-signed client certs for access control.
+5. SPIR-V / GLSL shader source variants on the wire.
 
 ## License
 

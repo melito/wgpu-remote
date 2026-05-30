@@ -17,7 +17,9 @@ use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use quinn::{ClientConfig, ConnectError, ConnectionError, Endpoint, ServerConfig};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
 
-use crate::{Connection, TransportError};
+use crate::Connection;
+use crate::TransportError;
+use crate::pki::ServerCert;
 
 /// ALPN identifier for the wgpu-remote protocol.
 pub const ALPN: &[u8] = b"wgpu-remote/1";
@@ -62,6 +64,25 @@ impl QuicEndpoint {
         let server_config = ServerConfig::with_crypto(Arc::new(quic_server_crypto));
         let endpoint = Endpoint::server(server_config, addr)?;
         Ok((Self { endpoint }, cert_der))
+    }
+
+    /// Bind a server endpoint using a CA-issued [`ServerCert`].
+    ///
+    /// The cert chain and private key come from `CertAuthority::issue_server_cert`.
+    pub fn server_with_cert(
+        addr: SocketAddr,
+        server_cert: ServerCert,
+    ) -> Result<Self, QuicError> {
+        let mut server_crypto = rustls::ServerConfig::builder()
+            .with_no_client_auth()
+            .with_single_cert(server_cert.cert_chain, server_cert.private_key)?;
+        server_crypto.alpn_protocols = vec![ALPN.to_vec()];
+
+        let quic_server_crypto = QuicServerConfig::try_from(server_crypto)
+            .map_err(|e| QuicError::Rustls(rustls::Error::General(format!("{e:?}"))))?;
+        let server_config = ServerConfig::with_crypto(Arc::new(quic_server_crypto));
+        let endpoint = Endpoint::server(server_config, addr)?;
+        Ok(Self { endpoint })
     }
 
     /// Build a client endpoint that pins exactly the supplied server cert.

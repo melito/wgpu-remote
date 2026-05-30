@@ -42,9 +42,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-/// Spin up the server binary in a temp dir. Returns the live child process,
-/// a connected QUIC client endpoint, and a [`Client`] talking to it.
-async fn spawn_server() -> anyhow::Result<(Child, QuicEndpoint, Client<QuicConnection>)> {
+/// Spin up the server binary in self-signed mode. Returns the live child
+/// process, a connected QUIC client endpoint, and a [`Client`] talking to it.
+async fn spawn_server_self_signed() -> anyhow::Result<(Child, QuicEndpoint, Client<QuicConnection>)>
+{
     let _ = rustls::crypto::ring::default_provider().install_default();
 
     let tmp = tempdir()?;
@@ -52,6 +53,7 @@ async fn spawn_server() -> anyhow::Result<(Child, QuicEndpoint, Client<QuicConne
     let port_path = tmp.join("port");
 
     let child = Command::new(SERVER_BIN)
+        .arg("--self-signed")
         .arg("--bind")
         .arg("127.0.0.1:0")
         .arg("--cert-out")
@@ -77,6 +79,44 @@ async fn spawn_server() -> anyhow::Result<(Child, QuicEndpoint, Client<QuicConne
     Ok((child, endpoint, client))
 }
 
+/// Spin up the server binary in CA mode. Returns the live child process,
+/// a connected QUIC client endpoint, and a [`Client`] talking to it.
+async fn spawn_server_ca() -> anyhow::Result<(Child, QuicEndpoint, Client<QuicConnection>)> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
+    let tmp = tempdir()?;
+    let ca_cert_path = tmp.join("ca-cert.der");
+    let ca_key_path = tmp.join("ca-key.der");
+    let port_path = tmp.join("port");
+
+    let child = Command::new(SERVER_BIN)
+        .arg("--bind")
+        .arg("127.0.0.1:0")
+        .arg("--ca-cert")
+        .arg(&ca_cert_path)
+        .arg("--ca-key")
+        .arg(&ca_key_path)
+        .arg("--port-file")
+        .arg(&port_path)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let port = wait_for_file(&port_path, Duration::from_secs(10))
+        .await?
+        .trim()
+        .parse::<u16>()?;
+    let ca_cert_der = wait_for_file_bytes(&ca_cert_path, Duration::from_secs(10)).await?;
+
+    let endpoint = QuicEndpoint::client(CertificateDer::from(ca_cert_der))?;
+    let connection = endpoint
+        .connect(format!("127.0.0.1:{port}").parse()?, "localhost")
+        .await?;
+    let client = Client::new(connection);
+    Ok((child, endpoint, client))
+}
+
 async fn ok<C: Connection + Clone>(client: &Client<C>, action: Action) {
     match client.request(action).await.expect("client request") {
         Response::Ok => {}
@@ -86,7 +126,31 @@ async fn ok<C: Connection + Clone>(client: &Client<C>, action: Action) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_handshake() -> anyhow::Result<()> {
-    let (mut child, endpoint, client) = spawn_server().await?;
+    let (mut child, endpoint, client) = spawn_server_self_signed().await?;
+
+    let resp = client
+        .request(Action::Hello {
+            protocol_version: PROTOCOL_VERSION,
+        })
+        .await?;
+    match resp {
+        Response::HelloAck { protocol_version } => {
+            assert_eq!(protocol_version, PROTOCOL_VERSION);
+        }
+        other => panic!("expected HelloAck, got {other:?}"),
+    }
+
+    drop(client);
+    drop(endpoint);
+    child.kill().await?;
+    Ok(())
+}
+
+/// Handshake using the CA-mode server. Proves the CA → server cert → client
+/// trust chain works end-to-end across a real process boundary.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn binary_handshake_ca() -> anyhow::Result<()> {
+    let (mut child, endpoint, client) = spawn_server_ca().await?;
 
     let resp = client
         .request(Action::Hello {
@@ -112,7 +176,7 @@ async fn binary_handshake() -> anyhow::Result<()> {
 /// freshly-built `wgpu-remote-server` binary.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn binary_compute_double() -> anyhow::Result<()> {
-    let (mut child, endpoint, client) = spawn_server().await?;
+    let (mut child, endpoint, client) = spawn_server_self_signed().await?;
 
     let storage_id = BufferId::new(1);
     let staging_id = BufferId::new(2);
