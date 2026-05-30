@@ -47,7 +47,7 @@ use wgpu_remote_client::{
 };
 use wgpu_remote_protocol::ids::{
     BindGroupId, BindGroupLayoutId, BufferId, ComputePipelineId, PipelineLayoutId,
-    RenderPipelineId, SamplerId, ShaderModuleId, TextureId, TextureViewId,
+    RenderPipelineId, SamplerId, ShaderModuleId, TextureViewId,
 };
 use wgpu_remote_transport::Connection;
 
@@ -490,11 +490,6 @@ pub(crate) struct Texture<C: Connection + Clone + 'static> {
     pub(crate) facade: FacadeTexture<C>,
 }
 
-impl<C: Connection + Clone + 'static> Texture<C> {
-    pub(crate) fn id(&self) -> TextureId {
-        self.facade.id()
-    }
-}
 
 impl<C: Connection + Clone + 'static> std::fmt::Debug for Texture<C> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
