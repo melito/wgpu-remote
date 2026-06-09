@@ -13,5 +13,8 @@ tokio.workspace = true
 futures-util.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
-# iroh added when this adapter is implemented; kept out of the dep graph until then
-# to avoid pulling in iroh-quinn for users who only want raw QUIC.
+iroh = "1.0.0-rc.1"
+
+[dev-dependencies]
+iroh-relay = { version = "1.0.0-rc.1", features = ["server", "test-utils"] }
+sha1 = "0.11.0-rc.5"
