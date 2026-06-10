@@ -4884,6 +4884,7 @@ dependencies = [
  "wgpu-remote-client",
  "wgpu-remote-protocol",
  "wgpu-remote-transport",
+ "wgpu-remote-transport-iroh",
  "wgpu-types",
 ]
 
@@ -4898,6 +4899,7 @@ dependencies = [
  "wgpu",
  "wgpu-remote-protocol",
  "wgpu-remote-transport",
+ "wgpu-remote-transport-iroh",
  "wgpu-types",
 ]
 
@@ -4925,6 +4927,7 @@ dependencies = [
  "wgpu-remote-client",
  "wgpu-remote-protocol",
  "wgpu-remote-transport",
+ "wgpu-remote-transport-iroh",
  "wgpu-types",
 ]
 

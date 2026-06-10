@@ -114,7 +114,7 @@ impl<C: Connection + Clone + 'static> Buffer<C> {
     }
 
     /// Read a range of the buffer back to the client. Requires the buffer
-    /// was created with [`BufferUsages::MAP_READ`] (and the range must fall
+    /// was created with `BufferUsages::MAP_READ` (and the range must fall
     /// within `0..self.size()`).
     ///
     /// Simpler shape than wgpu's `slice(...).map_async(...)` — we collapse

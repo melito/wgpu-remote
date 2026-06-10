@@ -55,9 +55,28 @@ Allocates a render target, runs a fragment shader that paints a checkerboard, co
 open checkerboard.ppm   # macOS; use xdg-open on Linux
 ```
 
-### Remote machines
+### Over iroh (no certs, NAT-traversed)
 
-For multi-machine use, copy `ca-cert.der` to the client and point both sides at it:
+iroh connects peers by endpoint ID — no IP addresses, no certificates, works across NATs.
+
+```bash
+# Terminal 1: start the server with iroh
+cargo run --release -p wgpu-remote-server -- --iroh
+# prints: endpoint id: 6c190b769dd5...
+```
+
+```bash
+# Terminal 2: connect by endpoint ID
+cargo run --release -p wgpu-remote-cli -- \
+    --iroh --endpoint-id 6c190b769dd5... ping
+
+cargo run --release -p wgpu-remote-cli -- \
+    --iroh --endpoint-id 6c190b769dd5... compute-double --count 16
+```
+
+### Remote machines (QUIC)
+
+For direct QUIC without iroh, copy `ca-cert.der` to the client and point both sides at it:
 
 ```bash
 # Server (on the GPU machine)

@@ -7,8 +7,9 @@
 //!     to a staging buffer, write out as a PPM (P6) image. The marquee
 //!     visual demo for the render path.
 //!
-//! The client trusts the CA cert (or a self-signed server cert in legacy mode)
-//! supplied via `--ca-cert` (or its alias `--cert`).
+//! Supports two transports:
+//!   - QUIC (default): connects to a server by IP:port with a CA cert.
+//!   - iroh (`--iroh`): connects by endpoint ID — no certs, NAT-traversed.
 
 use std::net::SocketAddr;
 use std::num::NonZeroU64;
@@ -17,8 +18,8 @@ use std::process::ExitCode;
 
 use bytes::Bytes;
 use rustls::pki_types::CertificateDer;
-use wgpu_remote_client::prelude::quic::*;
 use wgpu_remote_protocol::{Action, PROTOCOL_VERSION, Response};
+use wgpu_remote_transport::Connection;
 use wgpu_types::{
     Color, ColorTargetState, ColorWrites, Extent3d, LoadOp, MultisampleState, Operations,
     Origin3d, PrimitiveState, StoreOp, TexelCopyBufferLayout, TextureAspect, TextureDimension,
@@ -29,7 +30,7 @@ const USAGE: &str = "\
 wgpu-remote-cli — demo client for wgpu-remote-server
 
 USAGE:
-    wgpu-remote-cli <SUBCOMMAND>
+    wgpu-remote-cli [OPTIONS] <SUBCOMMAND>
 
 SUBCOMMANDS:
     ping                  Connect, exchange protocol handshake, disconnect.
@@ -37,30 +38,42 @@ SUBCOMMANDS:
     render-checkerboard   Render a checkerboard pattern, write the result as a
                           PPM image. Visual demo of the render path.
 
-COMMON OPTIONS:
+TRANSPORT:
+    --iroh                 Use iroh transport (NAT-traversed QUIC).
+    --endpoint-id <ID>     Server's iroh endpoint ID (required with --iroh).
+
+QUIC OPTIONS (default transport):
     --server <ADDR>    Server address  [default: 127.0.0.1:4433]
     --ca-cert <PATH>   Path to the CA cert (DER) — or a self-signed server
                        cert for legacy mode  [default: ./ca-cert.der]
     --cert <PATH>      Alias for --ca-cert
     --server-name <S>  Server name to verify against the cert  [default: localhost]
+
+SUBCOMMAND OPTIONS:
+    --count <N>        (compute-double) Number of u32 values  [default: 8]
+    --width <N>        (render-checkerboard) Image width      [default: 256]
+    --height <N>       (render-checkerboard) Image height     [default: 256]
+    --tile <N>         (render-checkerboard) Tile size         [default: 32]
+    --output <PATH>    (render-checkerboard) PPM output path   [default: ./checkerboard.ppm]
     -h, --help         Print this help
-
-`compute-double` extra options:
-    --count <N>        Number of u32 values to double  [default: 8]
-
-`render-checkerboard` extra options:
-    --width <N>        Image width in pixels   [default: 256]
-    --height <N>       Image height in pixels  [default: 256]
-    --tile <N>         Tile size in pixels     [default: 32]
-    --output <PATH>    Where to write the PPM. Use `-` for stdout
-                                              [default: ./checkerboard.ppm]
 ";
 
 #[derive(Debug)]
-struct Common {
+struct QuicOpts {
     server: SocketAddr,
     ca_cert: PathBuf,
     server_name: String,
+}
+
+#[derive(Debug)]
+struct IrohOpts {
+    endpoint_id: String,
+}
+
+#[derive(Debug)]
+enum TransportOpts {
+    Quic(QuicOpts),
+    Iroh(IrohOpts),
 }
 
 #[derive(Debug)]
@@ -72,27 +85,27 @@ struct CheckerboardArgs {
 }
 
 #[derive(Debug)]
-enum Cmd {
-    Ping(Common),
-    ComputeDouble(Common, u32),
-    RenderCheckerboard(Common, CheckerboardArgs),
+enum Workload {
+    Ping,
+    ComputeDouble(u32),
+    RenderCheckerboard(CheckerboardArgs),
+}
+
+#[derive(Debug)]
+struct Cmd {
+    transport: TransportOpts,
+    workload: Workload,
 }
 
 fn parse_args() -> Result<Cmd, String> {
     let mut argv = std::env::args().skip(1);
-    let sub = argv.next().ok_or_else(|| "missing subcommand".to_string())?;
-    match sub.as_str() {
-        "-h" | "--help" => {
-            print!("{USAGE}");
-            std::process::exit(0);
-        }
-        "ping" | "compute-double" | "render-checkerboard" => {}
-        other => return Err(format!("unknown subcommand: {other}")),
-    }
 
+    let mut sub: Option<String> = None;
     let mut server: SocketAddr = "127.0.0.1:4433".parse().unwrap();
     let mut ca_cert = PathBuf::from("./ca-cert.der");
     let mut server_name = "localhost".to_string();
+    let mut iroh = false;
+    let mut endpoint_id: Option<String> = None;
     let mut count: u32 = 8;
     let mut width: u32 = 256;
     let mut height: u32 = 256;
@@ -104,6 +117,8 @@ fn parse_args() -> Result<Cmd, String> {
             "--server" => server = argv.next().ok_or("--server needs a value")?.parse().map_err(|e| format!("invalid --server: {e}"))?,
             "--ca-cert" | "--cert" => ca_cert = PathBuf::from(argv.next().ok_or("--ca-cert needs a value")?),
             "--server-name" => server_name = argv.next().ok_or("--server-name needs a value")?,
+            "--iroh" => iroh = true,
+            "--endpoint-id" => endpoint_id = Some(argv.next().ok_or("--endpoint-id needs a value")?),
             "--count" => count = argv.next().ok_or("--count needs a value")?.parse().map_err(|e| format!("invalid --count: {e}"))?,
             "--width" => width = argv.next().ok_or("--width needs a value")?.parse().map_err(|e| format!("invalid --width: {e}"))?,
             "--height" => height = argv.next().ok_or("--height needs a value")?.parse().map_err(|e| format!("invalid --height: {e}"))?,
@@ -113,29 +128,42 @@ fn parse_args() -> Result<Cmd, String> {
                 print!("{USAGE}");
                 std::process::exit(0);
             }
+            other if !other.starts_with('-') && sub.is_none() => {
+                match other {
+                    "ping" | "compute-double" | "render-checkerboard" => sub = Some(other.to_string()),
+                    _ => return Err(format!("unknown subcommand: {other}")),
+                }
+            }
             other => return Err(format!("unknown argument: {other}")),
         }
     }
 
-    let common = Common {
-        server,
-        ca_cert,
-        server_name,
+    let sub = sub.ok_or_else(|| "missing subcommand".to_string())?;
+
+    let transport = if iroh {
+        let id = endpoint_id.ok_or("--iroh requires --endpoint-id")?;
+        TransportOpts::Iroh(IrohOpts { endpoint_id: id })
+    } else {
+        TransportOpts::Quic(QuicOpts {
+            server,
+            ca_cert,
+            server_name,
+        })
     };
-    Ok(match sub.as_str() {
-        "ping" => Cmd::Ping(common),
-        "compute-double" => Cmd::ComputeDouble(common, count),
-        "render-checkerboard" => Cmd::RenderCheckerboard(
-            common,
-            CheckerboardArgs {
-                width,
-                height,
-                tile,
-                output,
-            },
-        ),
+
+    let workload = match sub.as_str() {
+        "ping" => Workload::Ping,
+        "compute-double" => Workload::ComputeDouble(count),
+        "render-checkerboard" => Workload::RenderCheckerboard(CheckerboardArgs {
+            width,
+            height,
+            tile,
+            output,
+        }),
         _ => unreachable!(),
-    })
+    };
+
+    Ok(Cmd { transport, workload })
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -160,29 +188,72 @@ async fn real_main() -> anyhow::Result<()> {
 
     let _ = rustls::crypto::ring::default_provider().install_default();
 
-    match cmd {
-        Cmd::Ping(c) => ping(c).await,
-        Cmd::ComputeDouble(c, n) => compute_double(c, n).await,
-        Cmd::RenderCheckerboard(c, args) => render_checkerboard(c, args).await,
+    match cmd.transport {
+        TransportOpts::Quic(opts) => {
+            println!("connecting to {} via QUIC…", opts.server);
+            let conn = connect_quic(&opts).await?;
+            let client = wgpu_remote_client::Client::new(conn);
+            run_workload(client, cmd.workload).await
+        }
+        TransportOpts::Iroh(opts) => {
+            println!("connecting to {} via iroh…", &opts.endpoint_id[..12.min(opts.endpoint_id.len())]);
+            let conn = connect_iroh(&opts).await?;
+            let client = wgpu_remote_client::Client::new(conn);
+            run_workload(client, cmd.workload).await
+        }
     }
 }
 
-async fn connect(c: &Common) -> anyhow::Result<wgpu_remote_transport::quic::QuicConnection> {
-    let cert_bytes = std::fs::read(&c.ca_cert)
-        .map_err(|e| anyhow::anyhow!("read cert {}: {e}", c.ca_cert.display()))?;
+async fn connect_quic(
+    opts: &QuicOpts,
+) -> anyhow::Result<wgpu_remote_transport::quic::QuicConnection> {
+    use wgpu_remote_transport::quic::QuicEndpoint;
+    let cert_bytes = std::fs::read(&opts.ca_cert)
+        .map_err(|e| anyhow::anyhow!("read cert {}: {e}", opts.ca_cert.display()))?;
     let endpoint = QuicEndpoint::client(CertificateDer::from(cert_bytes))?;
-    let connection = endpoint.connect(c.server, &c.server_name).await?;
-    // Leak the endpoint so the connection stays alive past this fn — we hand
-    // back the connection to the caller, which owns the rest of the lifetime.
+    let connection = endpoint.connect(opts.server, &opts.server_name).await?;
     std::mem::forget(endpoint);
     Ok(connection)
 }
 
-async fn ping(c: Common) -> anyhow::Result<()> {
-    println!("connecting to {}…", c.server);
-    let connection = connect(&c).await?;
-    let client = Client::new(connection);
+async fn connect_iroh(
+    opts: &IrohOpts,
+) -> anyhow::Result<wgpu_remote_transport_iroh::IrohConnection> {
+    use wgpu_remote_transport::Transport;
+    use wgpu_remote_transport_iroh::IrohEndpoint;
 
+    let ep = IrohEndpoint::with_discovery().await?;
+    ep.endpoint().online().await;
+
+    let remote_id: wgpu_remote_transport_iroh::EndpointId = opts
+        .endpoint_id
+        .parse()
+        .map_err(|e| anyhow::anyhow!("invalid endpoint ID: {e}"))?;
+    let addr = wgpu_remote_transport_iroh::EndpointAddr::new(remote_id);
+    let conn = ep.dial(addr).await?;
+    // Keep endpoint alive for the connection's lifetime.
+    std::mem::forget(ep);
+    Ok(conn)
+}
+
+// ---------------------------------------------------------------------------
+// Workload dispatch (generic over any Connection)
+// ---------------------------------------------------------------------------
+
+async fn run_workload<C>(client: wgpu_remote_client::Client<C>, workload: Workload) -> anyhow::Result<()>
+where
+    C: Connection + Clone + 'static,
+{
+    match workload {
+        Workload::Ping => ping(client).await,
+        Workload::ComputeDouble(n) => compute_double(client, n).await,
+        Workload::RenderCheckerboard(args) => render_checkerboard(client, args).await,
+    }
+}
+
+async fn ping<C: Connection + Clone + 'static>(
+    client: wgpu_remote_client::Client<C>,
+) -> anyhow::Result<()> {
     let response = client
         .request(Action::Hello {
             protocol_version: PROTOCOL_VERSION,
@@ -211,14 +282,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-async fn compute_double(c: Common, count: u32) -> anyhow::Result<()> {
+async fn compute_double<C: Connection + Clone + 'static>(
+    client: wgpu_remote_client::Client<C>,
+    count: u32,
+) -> anyhow::Result<()> {
+    use wgpu_remote_client::*;
+
     if count == 0 {
         anyhow::bail!("--count must be at least 1");
     }
-    println!("connecting to {}…", c.server);
-    let connection = connect(&c).await?;
 
-    let instance = Instance::new(Client::new(connection));
+    let instance = Instance::new(client);
     let adapter = instance.request_adapter().await?;
     let (device, queue) = adapter.request_device().await?;
     println!("connected and got device — building workload");
@@ -231,73 +305,66 @@ async fn compute_double(c: Common, count: u32) -> anyhow::Result<()> {
         .into();
     let buffer_size = input_bytes.len() as u64;
 
-    let storage = device
-        .create_buffer(&BufferDescriptor {
-            label: Some("storage".into()),
-            size: buffer_size,
-            usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
-            mapped_at_creation: false,
-        });
-    let staging = device
-        .create_buffer(&BufferDescriptor {
-            label: Some("staging".into()),
-            size: buffer_size,
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+    let storage = device.create_buffer(&descriptors::BufferDescriptor {
+        label: Some("storage".into()),
+        size: buffer_size,
+        usage: BufferUsages::STORAGE | BufferUsages::COPY_DST | BufferUsages::COPY_SRC,
+        mapped_at_creation: false,
+    });
+    let staging = device.create_buffer(&descriptors::BufferDescriptor {
+        label: Some("staging".into()),
+        size: buffer_size,
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
 
     queue.write_buffer(&storage, 0, input_bytes.clone());
 
-    let shader = device
-        .create_shader_module(ShaderModuleDescriptor {
-            label: Some("double".into()),
-            source: ShaderSource::Wgsl(DOUBLE_SHADER.into()),
-        });
+    let shader = device.create_shader_module(descriptors::ShaderModuleDescriptor {
+        label: Some("double".into()),
+        source: descriptors::ShaderSource::Wgsl(DOUBLE_SHADER.into()),
+    });
 
-    let bgl = device
-        .create_bind_group_layout(BindGroupLayoutDescriptor {
-            label: Some("storage-bgl".into()),
-            entries: vec![BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::COMPUTE,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Storage { read_only: false },
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(buffer_size),
-                },
-                count: None,
-            }],
-        });
+    let bgl = device.create_bind_group_layout(descriptors::BindGroupLayoutDescriptor {
+        label: Some("storage-bgl".into()),
+        entries: vec![BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::COMPUTE,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Storage { read_only: false },
+                has_dynamic_offset: false,
+                min_binding_size: NonZeroU64::new(buffer_size),
+            },
+            count: None,
+        }],
+    });
 
-    let bind_group = device
-        .create_bind_group(BindGroupDescriptor {
-            label: Some("storage-bg".into()),
-            layout: bgl.id(),
-            entries: vec![BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Buffer {
-                    buffer: storage.id(),
-                    offset: 0,
-                    size: None,
-                },
-            }],
-        });
+    let bind_group = device.create_bind_group(descriptors::BindGroupDescriptor {
+        label: Some("storage-bg".into()),
+        layout: bgl.id(),
+        entries: vec![descriptors::BindGroupEntry {
+            binding: 0,
+            resource: descriptors::BindingResource::Buffer {
+                buffer: storage.id(),
+                offset: 0,
+                size: None,
+            },
+        }],
+    });
 
-    let pipeline_layout = device
-        .create_pipeline_layout(PipelineLayoutDescriptor {
-            label: Some("compute-layout".into()),
-            bind_group_layouts: vec![bgl.id()],
-            push_constant_ranges: vec![],
-        });
+    let pipeline_layout = device.create_pipeline_layout(descriptors::PipelineLayoutDescriptor {
+        label: Some("compute-layout".into()),
+        bind_group_layouts: vec![bgl.id()],
+        push_constant_ranges: vec![],
+    });
 
-    let pipeline = device
-        .create_compute_pipeline(ComputePipelineDescriptor {
-            label: Some("double-pipeline".into()),
-            layout: Some(pipeline_layout.id()),
-            module: shader.id(),
-            entry_point: Some("main".into()),
-            constants: vec![],
-        });
+    let pipeline = device.create_compute_pipeline(descriptors::ComputePipelineDescriptor {
+        label: Some("double-pipeline".into()),
+        layout: Some(pipeline_layout.id()),
+        module: shader.id(),
+        entry_point: Some("main".into()),
+        constants: vec![],
+    });
 
     let mut encoder = device.create_command_encoder(Some("double-cmds".into()));
     {
@@ -369,14 +436,17 @@ fn align_up(v: u32, align: u32) -> u32 {
     v.div_ceil(align) * align
 }
 
-async fn render_checkerboard(c: Common, args: CheckerboardArgs) -> anyhow::Result<()> {
+async fn render_checkerboard<C: Connection + Clone + 'static>(
+    client: wgpu_remote_client::Client<C>,
+    args: CheckerboardArgs,
+) -> anyhow::Result<()> {
+    use wgpu_remote_client::*;
+
     if args.width == 0 || args.height == 0 || args.tile == 0 {
         anyhow::bail!("--width, --height, and --tile must all be at least 1");
     }
-    println!("connecting to {}…", c.server);
-    let connection = connect(&c).await?;
 
-    let instance = Instance::new(Client::new(connection));
+    let instance = Instance::new(client);
     let adapter = instance.request_adapter().await?;
     let (device, queue) = adapter.request_device().await?;
     println!(
@@ -385,22 +455,21 @@ async fn render_checkerboard(c: Common, args: CheckerboardArgs) -> anyhow::Resul
     );
 
     // 1. Render target.
-    let texture = device
-        .create_texture(&TextureDescriptor {
-            label: Some("checkerboard".into()),
-            size: Extent3d {
-                width: args.width,
-                height: args.height,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: TextureDimension::D2,
-            format: TextureFormat::Rgba8Unorm,
-            usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
-            view_formats: vec![],
-        });
-    let view = texture.create_view(TextureViewDescriptor::default());
+    let texture = device.create_texture(&descriptors::TextureDescriptor {
+        label: Some("checkerboard".into()),
+        size: Extent3d {
+            width: args.width,
+            height: args.height,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: TextureDimension::D2,
+        format: TextureFormat::Rgba8Unorm,
+        usage: TextureUsages::RENDER_ATTACHMENT | TextureUsages::COPY_SRC,
+        view_formats: vec![],
+    });
+    let view = texture.create_view(descriptors::TextureViewDescriptor::default());
 
     // 2. Uniform buffer carrying tile size + image dimensions.
     let unpadded_bpr = args.width * 4;
@@ -423,87 +492,80 @@ async fn render_checkerboard(c: Common, args: CheckerboardArgs) -> anyhow::Resul
     };
     let params_bytes: [u8; 16] = unsafe { std::mem::transmute(params) };
 
-    let uniform = device
-        .create_buffer(&BufferDescriptor {
-            label: Some("params".into()),
-            size: 16,
-            usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
+    let uniform = device.create_buffer(&descriptors::BufferDescriptor {
+        label: Some("params".into()),
+        size: 16,
+        usage: BufferUsages::UNIFORM | BufferUsages::COPY_DST,
+        mapped_at_creation: false,
+    });
     queue.write_buffer(&uniform, 0, Bytes::copy_from_slice(&params_bytes));
 
-    let staging = device
-        .create_buffer(&BufferDescriptor {
-            label: Some("staging".into()),
-            size: staging_size,
-            usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
-            mapped_at_creation: false,
-        });
+    let staging = device.create_buffer(&descriptors::BufferDescriptor {
+        label: Some("staging".into()),
+        size: staging_size,
+        usage: BufferUsages::COPY_DST | BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
 
     // 3. Bind group + pipeline.
-    let bgl = device
-        .create_bind_group_layout(BindGroupLayoutDescriptor {
-            label: Some("params-bgl".into()),
-            entries: vec![BindGroupLayoutEntry {
-                binding: 0,
-                visibility: ShaderStages::FRAGMENT,
-                ty: BindingType::Buffer {
-                    ty: BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: NonZeroU64::new(16),
-                },
-                count: None,
-            }],
-        });
-    let bind_group = device
-        .create_bind_group(BindGroupDescriptor {
-            label: Some("params-bg".into()),
-            layout: bgl.id(),
-            entries: vec![BindGroupEntry {
-                binding: 0,
-                resource: BindingResource::Buffer {
-                    buffer: uniform.id(),
-                    offset: 0,
-                    size: None,
-                },
-            }],
-        });
-    let pipeline_layout = device
-        .create_pipeline_layout(PipelineLayoutDescriptor {
-            label: Some("checker-layout".into()),
-            bind_group_layouts: vec![bgl.id()],
-            push_constant_ranges: vec![],
-        });
-    let shader = device
-        .create_shader_module(ShaderModuleDescriptor {
-            label: Some("checkerboard".into()),
-            source: ShaderSource::Wgsl(CHECKERBOARD_SHADER.into()),
-        });
-    let pipeline = device
-        .create_render_pipeline(RenderPipelineDescriptor {
-            label: Some("checker-pipe".into()),
-            layout: Some(pipeline_layout.id()),
-            vertex: VertexState {
-                module: shader.id(),
-                entry_point: Some("vs_main".into()),
-                constants: vec![],
-                buffers: vec![],
+    let bgl = device.create_bind_group_layout(descriptors::BindGroupLayoutDescriptor {
+        label: Some("params-bgl".into()),
+        entries: vec![BindGroupLayoutEntry {
+            binding: 0,
+            visibility: ShaderStages::FRAGMENT,
+            ty: BindingType::Buffer {
+                ty: BufferBindingType::Uniform,
+                has_dynamic_offset: false,
+                min_binding_size: NonZeroU64::new(16),
             },
-            primitive: PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: MultisampleState::default(),
-            fragment: Some(FragmentState {
-                module: shader.id(),
-                entry_point: Some("fs_main".into()),
-                constants: vec![],
-                targets: vec![Some(ColorTargetState {
-                    format: TextureFormat::Rgba8Unorm,
-                    blend: None,
-                    write_mask: ColorWrites::ALL,
-                })],
-            }),
-            multiview: None,
-        });
+            count: None,
+        }],
+    });
+    let bind_group = device.create_bind_group(descriptors::BindGroupDescriptor {
+        label: Some("params-bg".into()),
+        layout: bgl.id(),
+        entries: vec![descriptors::BindGroupEntry {
+            binding: 0,
+            resource: descriptors::BindingResource::Buffer {
+                buffer: uniform.id(),
+                offset: 0,
+                size: None,
+            },
+        }],
+    });
+    let pipeline_layout = device.create_pipeline_layout(descriptors::PipelineLayoutDescriptor {
+        label: Some("checker-layout".into()),
+        bind_group_layouts: vec![bgl.id()],
+        push_constant_ranges: vec![],
+    });
+    let shader = device.create_shader_module(descriptors::ShaderModuleDescriptor {
+        label: Some("checkerboard".into()),
+        source: descriptors::ShaderSource::Wgsl(CHECKERBOARD_SHADER.into()),
+    });
+    let pipeline = device.create_render_pipeline(descriptors::RenderPipelineDescriptor {
+        label: Some("checker-pipe".into()),
+        layout: Some(pipeline_layout.id()),
+        vertex: descriptors::VertexState {
+            module: shader.id(),
+            entry_point: Some("vs_main".into()),
+            constants: vec![],
+            buffers: vec![],
+        },
+        primitive: PrimitiveState::default(),
+        depth_stencil: None,
+        multisample: MultisampleState::default(),
+        fragment: Some(descriptors::FragmentState {
+            module: shader.id(),
+            entry_point: Some("fs_main".into()),
+            constants: vec![],
+            targets: vec![Some(ColorTargetState {
+                format: TextureFormat::Rgba8Unorm,
+                blend: None,
+                write_mask: ColorWrites::ALL,
+            })],
+        }),
+        multiview: None,
+    });
 
     // 4. Encode + submit.
     let mut encoder = device.create_command_encoder(Some("checker-cmds".into()));

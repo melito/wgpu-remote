@@ -14,7 +14,8 @@ path = "src/main.rs"
 [dependencies]
 wgpu-remote-protocol.workspace = true
 wgpu-remote-transport.workspace = true
-wgpu-remote-client.workspace = true
+wgpu-remote-transport-iroh.workspace = true
+wgpu-remote-client = { workspace = true, features = ["iroh"] }
 wgpu-types.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 bytes.workspace = true

@@ -1,9 +1,10 @@
 //! Convenience re-exports for callers that don't want to write the
 //! [`Connection`](wgpu_remote_transport::Connection) generic at every type.
 //!
-//! Two prelude flavors mirror the two transports the workspace ships:
+//! Prelude flavors mirror the transports the workspace ships:
 //!
 //! - [`quic`]: `Buffer`, `Device`, … specialized to `QuicConnection`.
+//! - [`iroh`]: same types specialized to `IrohConnection`.
 //! - The in-memory equivalent lives in `wgpu-remote-tests::prelude::in_memory`
 //!   (closer to where it's used).
 //!
@@ -55,6 +56,51 @@ pub mod quic {
 
     // Descriptor types (transport-agnostic) are re-exported as-is so a single
     // `use prelude::quic::*` covers everything the user needs.
+    pub use crate::descriptors::{
+        BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindingResource,
+        BufferBinding, BufferDescriptor, ComputePipelineDescriptor, FragmentState,
+        PipelineLayoutDescriptor, RenderPipelineDescriptor, SamplerDescriptor, ShaderModuleDescriptor,
+        ShaderSource, TextureDescriptor, TextureViewDescriptor, VertexBufferLayout, VertexState,
+    };
+    pub use crate::{
+        BindGroupLayoutEntry, BindingType, BufferBindingType, BufferUsages, ShaderStages,
+    };
+}
+
+#[cfg(feature = "iroh")]
+pub mod iroh {
+    //! Type aliases specialized to `IrohConnection`.
+
+    use wgpu_remote_transport_iroh::IrohConnection;
+
+    pub use wgpu_remote_transport_iroh::{IrohConnection as Connection, IrohEndpoint};
+
+    pub type Client = crate::Client<IrohConnection>;
+    pub type Instance = crate::Instance<IrohConnection>;
+    pub type Adapter = crate::Adapter<IrohConnection>;
+    pub type Device = crate::Device<IrohConnection>;
+    pub type Queue = crate::Queue<IrohConnection>;
+
+    pub type Buffer = crate::Buffer<IrohConnection>;
+    pub type Texture = crate::Texture<IrohConnection>;
+    pub type TextureView = crate::TextureView<IrohConnection>;
+    pub type Sampler = crate::Sampler<IrohConnection>;
+    pub type ShaderModule = crate::ShaderModule<IrohConnection>;
+    pub type BindGroupLayout = crate::BindGroupLayout<IrohConnection>;
+    pub type BindGroup = crate::BindGroup<IrohConnection>;
+    pub type PipelineLayout = crate::PipelineLayout<IrohConnection>;
+    pub type ComputePipeline = crate::ComputePipeline<IrohConnection>;
+    pub type RenderPipeline = crate::RenderPipeline<IrohConnection>;
+
+    pub type CommandEncoder = crate::CommandEncoder<IrohConnection>;
+    pub type ComputePass<'enc> = crate::ComputePass<'enc, IrohConnection>;
+    pub type RenderPass<'enc> = crate::RenderPass<'enc, IrohConnection>;
+    pub type RenderPassDescriptor<'a> = crate::RenderPassDescriptor<'a, IrohConnection>;
+    pub type ColorAttachment<'a> = crate::ColorAttachment<'a, IrohConnection>;
+    pub type DepthStencilAttachment<'a> = crate::DepthStencilAttachment<'a, IrohConnection>;
+    pub use crate::CommandBuffer;
+    pub use crate::ClientError;
+
     pub use crate::descriptors::{
         BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor, BindingResource,
         BufferBinding, BufferDescriptor, ComputePipelineDescriptor, FragmentState,

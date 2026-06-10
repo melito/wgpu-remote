@@ -2,13 +2,16 @@
 //!
 //! Uses iroh's NAT-traversing QUIC stack to implement the [`Transport`] and
 //! [`Connection`] traits. Peers are addressed by [`EndpointAddr`] (an
-//! [`EndpointId`] plus optional relay/direct addresses).
+//! `EndpointId` plus optional relay/direct addresses).
 
 use bytes::Bytes;
 use iroh::endpoint::presets::Minimal;
 use iroh::endpoint::{RecvStream, SendStream, VarInt};
-use iroh::{Endpoint, EndpointAddr, SecretKey};
+use iroh::{Endpoint, SecretKey};
 use wgpu_remote_transport::{Connection, Datagrams, Transport, TransportError};
+
+// Re-export iroh types that callers need for addressing.
+pub use iroh::{EndpointAddr, EndpointId};
 
 /// ALPN identifier for wgpu-remote over iroh.
 pub const ALPN: &[u8] = b"wgpu-remote/1";
@@ -25,14 +28,31 @@ impl IrohEndpoint {
     /// Create a new iroh endpoint with a random secret key.
     ///
     /// Uses the `Minimal` preset (ring TLS crypto, no relay/discovery).
+    /// For endpoints that need to connect across networks, use
+    /// [`IrohEndpoint::with_discovery`] instead.
     pub async fn new() -> Result<Self, IrohError> {
         Self::with_secret_key(SecretKey::generate()).await
     }
 
     /// Create a new iroh endpoint with the given secret key.
+    ///
+    /// Uses the `Minimal` preset (no relay/discovery).
     pub async fn with_secret_key(secret_key: SecretKey) -> Result<Self, IrohError> {
         let endpoint = Endpoint::builder(Minimal)
             .secret_key(secret_key)
+            .alpns(vec![ALPN.to_vec()])
+            .bind()
+            .await?;
+        Ok(Self { endpoint })
+    }
+
+    /// Create an endpoint with n0's public relay + DNS discovery.
+    ///
+    /// This is the recommended constructor for real-world use — endpoints
+    /// can find each other by ID alone, with NAT traversal via relay.
+    pub async fn with_discovery() -> Result<Self, IrohError> {
+        use iroh::endpoint::presets::N0;
+        let endpoint = Endpoint::builder(N0)
             .alpns(vec![ALPN.to_vec()])
             .bind()
             .await?;

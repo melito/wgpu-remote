@@ -30,7 +30,7 @@ use crate::{
     resources::{BindGroup, Buffer, ComputePipeline, RenderPipeline, Texture, TextureView},
 };
 
-/// A `wgpu::CommandEncoder` mirror. Calls accumulate into [`recording`].
+/// A `wgpu::CommandEncoder` mirror. Calls accumulate into an internal recording.
 pub struct CommandEncoder<C: Connection + Clone + 'static> {
     label: Option<String>,
     commands: Vec<EncoderCommand>,

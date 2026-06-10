@@ -1,5 +1,5 @@
 //! Replay engine. Owns a `wgpu::Instance` + `Device` + `Queue` and a set of
-//! [`ResourceTables`](crate::tables::ResourceTables); receives [`Frame`]s,
+//! [`ResourceTables`]; receives [`Frame`]s,
 //! dispatches against `wgpu`, returns [`ResponseFrame`]s.
 //!
 //! v1 scope: handshake, buffer create/destroy/write, buffer readback. Other

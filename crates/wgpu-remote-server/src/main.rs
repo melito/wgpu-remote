@@ -1,11 +1,13 @@
-//! `wgpu-remote-server` — accepts QUIC connections from a `wgpu-remote-client`
+//! `wgpu-remote-server` — accepts connections from a `wgpu-remote-client`
 //! and replays GPU actions against the local wgpu device.
 //!
-//! Supports two modes:
-//!   - **CA mode** (default): loads or generates a private CA, issues a server
-//!     cert on startup. Clients pin the CA cert.
-//!   - **Self-signed mode** (`--self-signed`): generates a throwaway self-signed
-//!     cert on every startup, like v0. Useful for quick testing.
+//! Supports three transport modes:
+//!   - **CA mode** (default): QUIC with a private CA. Loads or generates a CA,
+//!     issues a server cert on startup. Clients pin the CA cert.
+//!   - **Self-signed mode** (`--self-signed`): QUIC with a throwaway self-signed
+//!     cert on every startup.
+//!   - **iroh mode** (`--iroh`): NAT-traversed QUIC via iroh. No certs needed —
+//!     clients connect by endpoint ID.
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -15,9 +17,10 @@ use std::sync::Arc;
 use wgpu_remote_server::{Engine, run_connection};
 use wgpu_remote_transport::pki::CertAuthority;
 use wgpu_remote_transport::quic::QuicEndpoint;
+use wgpu_remote_transport_iroh::IrohEndpoint;
 
 const USAGE: &str = "\
-wgpu-remote-server — proxy wgpu calls to this machine's GPU over QUIC
+wgpu-remote-server — proxy wgpu calls to this machine's GPU
 
 USAGE:
     wgpu-remote-server [OPTIONS]
@@ -27,7 +30,12 @@ SUBCOMMANDS:
     init-ca             Generate a new CA keypair and write it to disk.
                         Does not start the server.
 
-SERVER OPTIONS:
+TRANSPORT:
+    --iroh              Use iroh transport (NAT-traversed QUIC). No certs
+                        needed — prints an endpoint ID that clients use to
+                        connect. Ignores all QUIC/cert options.
+
+QUIC OPTIONS (default transport):
     --bind <ADDR>       Address to listen on  [default: 0.0.0.0:4433]
     --ca-cert <PATH>    CA certificate (DER) [default: ./ca-cert.der]
     --ca-key <PATH>     CA private key (DER) [default: ./ca-key.der]
@@ -62,6 +70,7 @@ struct ServeArgs {
     cert_out: Option<PathBuf>,
     self_signed: bool,
     port_file: Option<PathBuf>,
+    iroh: bool,
 }
 
 #[derive(Debug)]
@@ -86,6 +95,7 @@ fn parse_args() -> Result<Cmd, String> {
     let mut cert_out: Option<PathBuf> = None;
     let mut self_signed = false;
     let mut port_file: Option<PathBuf> = None;
+    let mut iroh = false;
 
     while let Some(arg) = argv.next() {
         match arg.as_str() {
@@ -116,6 +126,9 @@ fn parse_args() -> Result<Cmd, String> {
                 let v = argv.next().ok_or("--port-file requires a value")?;
                 port_file = Some(PathBuf::from(v));
             }
+            "--iroh" => {
+                iroh = true;
+            }
             "-h" | "--help" => {
                 print!("{USAGE}");
                 std::process::exit(0);
@@ -135,6 +148,7 @@ fn parse_args() -> Result<Cmd, String> {
             cert_out,
             self_signed,
             port_file,
+            iroh,
         }))
     }
 }
@@ -163,7 +177,8 @@ async fn real_main() -> anyhow::Result<()> {
 
     match cmd {
         Cmd::InitCa(args) => init_ca(args),
-        Cmd::Serve(args) => serve(args).await,
+        Cmd::Serve(args) if args.iroh => serve_iroh().await,
+        Cmd::Serve(args) => serve_quic(args).await,
     }
 }
 
@@ -176,7 +191,39 @@ fn init_ca(args: CaArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn serve(args: ServeArgs) -> anyhow::Result<()> {
+async fn serve_iroh() -> anyhow::Result<()> {
+    let ep = IrohEndpoint::with_discovery().await?;
+    ep.endpoint().online().await;
+    let id = ep.id();
+    eprintln!("wgpu-remote-server listening via iroh");
+    eprintln!("endpoint id: {id}");
+    eprintln!("connect with: cargo run -p wgpu-remote-cli -- --iroh --endpoint-id {id} ping");
+
+    let engine = Arc::new(Engine::new().await?);
+    eprintln!("wgpu engine ready");
+
+    loop {
+        match wgpu_remote_transport::Transport::accept(&ep).await {
+            Ok(conn) => {
+                let remote = conn.remote_id();
+                eprintln!("accepted iroh connection from {remote}");
+                let engine = engine.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = run_connection(engine, conn).await {
+                        eprintln!("connection ended with error: {e}");
+                    }
+                });
+            }
+            Err(e) => {
+                eprintln!("accept failed: {e}");
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn serve_quic(args: ServeArgs) -> anyhow::Result<()> {
     let endpoint = if args.self_signed {
         // Legacy self-signed mode.
         let (ep, cert) = QuicEndpoint::server(args.bind)?;

@@ -9,17 +9,13 @@ description = "Client-side wgpu-shaped facade for a remote GPU. For a true wgpu 
 
 [features]
 default = ["quic"]
-# Enables the [`prelude::quic`] module of QuicConnection-specialized
-# type aliases. The transport crate's `quic` feature is on by default at the
-# workspace level, so disabling this only hides the prelude module — it
-# doesn't actually shrink the dependency graph. Real shrinking would require
-# `default-features = false` on the workspace dep, which Cargo forbids
-# overriding from a member crate.
 quic = []
+iroh = ["dep:wgpu-remote-transport-iroh"]
 
 [dependencies]
 wgpu-remote-protocol.workspace = true
 wgpu-remote-transport.workspace = true
+wgpu-remote-transport-iroh = { workspace = true, optional = true }
 wgpu.workspace = true
 wgpu-types.workspace = true
 tokio.workspace = true

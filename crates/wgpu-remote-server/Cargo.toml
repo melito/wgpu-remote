@@ -17,6 +17,7 @@ path = "src/lib.rs"
 [dependencies]
 wgpu-remote-protocol.workspace = true
 wgpu-remote-transport.workspace = true
+wgpu-remote-transport-iroh.workspace = true
 wgpu.workspace = true
 wgpu-types.workspace = true
 tokio = { workspace = true, features = ["sync"] }
