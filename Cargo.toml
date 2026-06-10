@@ -1,6 +1,7 @@
 [workspace]
 resolver = "3"
 members = [
+    "crates/wgpu-remote",
     "crates/wgpu-remote-protocol",
     "crates/wgpu-remote-transport",
     "crates/wgpu-remote-transport-iroh",
@@ -27,7 +28,7 @@ wgpu-remote-client = { version = "0.1.0", path = "crates/wgpu-remote-client" }
 wgpu-remote-wgpu = { version = "0.1.0", path = "crates/wgpu-remote-wgpu" }
 wgpu-remote-cli = { version = "0.1.0", path = "crates/wgpu-remote-cli" }
 wgpu-remote-server = { version = "0.1.0", path = "crates/wgpu-remote-server" }
-wgpu-remote-tests = { version = "0.1.0", path = "crates/wgpu-remote-tests" }
+wgpu-remote-tests = { path = "crates/wgpu-remote-tests" }
 
 # Pin wgpu — client and server MUST agree on this exact version
 wgpu = "27"

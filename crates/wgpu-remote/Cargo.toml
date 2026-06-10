@@ -1,0 +1,22 @@
+[package]
+name = "wgpu-remote"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Run wgpu workloads on a GPU that lives on another machine."
+
+[features]
+default = ["quic", "iroh"]
+quic = ["wgpu-remote-transport/quic"]
+iroh = ["dep:wgpu-remote-transport-iroh"]
+
+[dependencies]
+wgpu-remote-wgpu.workspace = true
+wgpu-remote-transport.workspace = true
+wgpu-remote-transport-iroh = { workspace = true, optional = true }
+wgpu.workspace = true
+rustls = { workspace = true }
+tokio.workspace = true
+thiserror.workspace = true

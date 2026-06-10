@@ -18,6 +18,6 @@ bytes.workspace = true
 
 [dev-dependencies]
 wgpu-remote-server.workspace = true
-wgpu-remote-tests.workspace = true
+wgpu-remote-tests = { path = "../wgpu-remote-tests" }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync"] }
 anyhow.workspace = true
