@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 use tokio::io::{DuplexStream, ReadHalf, WriteHalf, duplex, split};
 use tokio::sync::{Mutex, mpsc};
-use wgpu_remote_transport::{Connection, TransportError};
+use wgpu_remote::transport::{Connection, TransportError};
 
 const STREAM_BUF_BYTES: usize = 64 * 1024;
 const QUEUE_DEPTH: usize = 64;

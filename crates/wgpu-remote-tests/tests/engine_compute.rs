@@ -8,7 +8,7 @@
 use std::num::NonZeroU64;
 
 use bytes::Bytes;
-use wgpu_remote_protocol::{
+use wgpu_remote::protocol::{
     Response,
     actions::{Action, Frame, RequestId},
     commands::{CommandBufferRecording, ComputeCommand, EncoderCommand},
@@ -22,7 +22,7 @@ use wgpu_remote_protocol::{
         ShaderModuleId,
     },
 };
-use wgpu_remote_server::Engine;
+use wgpu_remote::server::Engine;
 use wgpu_types::{
     BindGroupLayoutEntry, BindingType, BufferBindingType, BufferUsages, ShaderStages,
 };

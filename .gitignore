@@ -1,3 +1,4 @@
 /target
 /checker.ppm
 /server-cert.der
+*.der

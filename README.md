@@ -12,6 +12,56 @@ Your code talks to a wgpu-shaped API. Under the hood every call is serialized, s
 
 This is a research prototype — see [Status](#status) for what's working.
 
+## Install
+
+Everything ships in a single crate — `wgpu-remote` — gated by cargo features. Add it alongside a matching `wgpu`:
+
+```toml
+[dependencies]
+# Client drop-in over QUIC (the default).
+wgpu-remote = "0.1"
+wgpu = "27"
+```
+
+```bash
+# Or from the command line:
+cargo add wgpu-remote wgpu@27
+```
+
+The client and server must agree on the exact `wgpu` version — this crate pins **wgpu 27**.
+
+### Features
+
+| Feature      | Default | Enables                                                                       |
+|--------------|:-------:|-------------------------------------------------------------------------------|
+| `client`     |   ✅    | wgpu drop-in (`install`, `connect_quic`, `connect_iroh`) + the wgpu-shaped facade |
+| `quic`       |   ✅    | quinn-based QUIC transport + private CA                                        |
+| `iroh`       |         | iroh transport — NAT-traversed QUIC, connect by endpoint ID (no certs/IPs)     |
+| `server`     |         | replay engine as a library (`wgpu_remote::server`)                             |
+| `server-bin` |         | the `wgpu-remote-server` binary (implies `server`)                             |
+| `cli`        |         | the `wgpu-remote-cli` demo binary (implies `client`)                           |
+
+```toml
+# Client with iroh NAT traversal:
+wgpu-remote = { version = "0.1", features = ["iroh"] }
+
+# Embed a server in your own process:
+wgpu-remote = { version = "0.1", features = ["server"] }
+
+# Client-only, pick your transport explicitly:
+wgpu-remote = { version = "0.1", default-features = false, features = ["client", "iroh"] }
+```
+
+### Binaries
+
+The server and demo CLI are feature-gated binaries in the same crate:
+
+```bash
+# Installs `wgpu-remote-server` and `wgpu-remote-cli` onto your PATH.
+# (both binaries support QUIC and iroh out of the box)
+cargo install wgpu-remote --features "server-bin cli"
+```
+
 ## Try it
 
 ### 1. Start the server
@@ -20,7 +70,7 @@ The server binds a QUIC socket and replays GPU commands against a real `wgpu::De
 
 ```bash
 # First run auto-generates a private CA (ca-cert.der + ca-key.der)
-cargo run --release -p wgpu-remote-server
+wgpu-remote-server
 ```
 
 You should see the server listening on `0.0.0.0:4433`.
@@ -28,7 +78,7 @@ You should see the server listening on `0.0.0.0:4433`.
 ### 2. Ping the server
 
 ```bash
-cargo run --release -p wgpu-remote-cli -- ping
+wgpu-remote-cli ping
 ```
 
 This connects, exchanges a protocol handshake, and disconnects. If you see `ok — server speaks protocol v1`, the transport layer is working.
@@ -36,7 +86,7 @@ This connects, exchanges a protocol handshake, and disconnects. If you see `ok �
 ### 3. Run a compute shader
 
 ```bash
-cargo run --release -p wgpu-remote-cli -- compute-double --count 16
+wgpu-remote-cli compute-double --count 16
 ```
 
 Uploads `[1, 2, …, 16]` to a GPU storage buffer, dispatches a WGSL compute shader that doubles each value, copies the result to a staging buffer, maps it back, and prints input vs. output. Every step crosses the QUIC connection.
@@ -44,7 +94,7 @@ Uploads `[1, 2, …, 16]` to a GPU storage buffer, dispatches a WGSL compute sha
 ### 4. Render an image
 
 ```bash
-cargo run --release -p wgpu-remote-cli -- render-checkerboard \
+wgpu-remote-cli render-checkerboard \
     --width 512 --height 512 --tile 64 \
     --output checkerboard.ppm
 ```
@@ -61,16 +111,16 @@ iroh connects peers by endpoint ID — no IP addresses, no certificates, works a
 
 ```bash
 # Terminal 1: start the server with iroh
-cargo run --release -p wgpu-remote-server -- --iroh
+wgpu-remote-server --iroh
 # prints: endpoint id: 6c190b769dd5...
 ```
 
 ```bash
 # Terminal 2: connect by endpoint ID
-cargo run --release -p wgpu-remote-cli -- \
+wgpu-remote-cli \
     --iroh --endpoint-id 6c190b769dd5... ping
 
-cargo run --release -p wgpu-remote-cli -- \
+wgpu-remote-cli \
     --iroh --endpoint-id 6c190b769dd5... compute-double --count 16
 ```
 
@@ -80,13 +130,13 @@ For direct QUIC without iroh, copy `ca-cert.der` to the client and point both si
 
 ```bash
 # Server (on the GPU machine)
-cargo run --release -p wgpu-remote-server -- \
+wgpu-remote-server \
     --bind 0.0.0.0:4433 \
     --ca-cert ca-cert.der --ca-key ca-key.der \
     --san my-gpu-box.local --san 192.168.1.42
 
 # Client (on your laptop)
-cargo run --release -p wgpu-remote-cli -- compute-double \
+wgpu-remote-cli compute-double \
     --server 192.168.1.42:4433 \
     --ca-cert ca-cert.der \
     --server-name my-gpu-box.local \
@@ -103,27 +153,28 @@ The CA cert is stable — server certs rotate on every restart without redistrib
 │      │                                      │
 │      ▼                                      │
 │  wgpu::Instance / Device / Queue / ...      │  ← real wgpu types
-│      │  (via wgpu_remote_wgpu::install)     │
+│      │  (via wgpu_remote::install)          │
 │      ▼                                      │
-│  wgpu_remote_client::Instance / Device /    │
+│  wgpu_remote::client::Instance / Device /   │
 │  Buffer / Queue / CommandEncoder            │  ← wgpu-shaped facade
 │      │                                      │
 │      ▼                                      │
-│  wgpu_remote_client::Client                 │  ← Action / Response RPC
+│  wgpu_remote::client::Client                │  ← Action / Response RPC
 │      │                                      │
 │      ▼                                      │
-│  wgpu_remote_transport::Connection          │  ← pluggable transport
+│  wgpu_remote::transport::Connection         │  ← pluggable transport
 │  ┌─────────────┬───────────────────────┐    │
 │  │ quinn (QUIC)│ iroh (NAT-traversed)  │    │
+│  │ [quic]      │ [iroh]                │    │  ← cargo features
 │  └─────────────┴───────────────────────┘    │
 └────────────────│────────────────────────────┘
                  │  UDP + TLS 1.3
 ┌────────────────│────────────────────────────┐
 │                ▼                            │
-│  wgpu-remote-server (binary)                │
+│  wgpu-remote-server (binary / [server])     │
 │      │                                      │
 │      ▼                                      │
-│  wgpu_remote_server::Engine                 │  ← replay against real wgpu
+│  wgpu_remote::server::Engine                │  ← replay against real wgpu
 │      │                                      │
 │      ▼                                      │
 │  wgpu::Instance → adapter → device → GPU    │
@@ -142,17 +193,19 @@ We serialize at the level of typed actions on the user-facing surface (descripto
 
 ## Using as a wgpu drop-in
 
-`wgpu_remote_wgpu::install(connection)` gives you a real `wgpu::Instance`. From there it's stock wgpu — no new types, no facade-specific APIs.
+`wgpu_remote::install(connection)` gives you a real `wgpu::Instance`. From there it's stock wgpu — no new types, no facade-specific APIs.
+
+For the common case, skip straight to a connected instance with `wgpu_remote::connect_quic("127.0.0.1:4433", "ca-cert.der").await?` (or `connect_iroh(endpoint_id)` with the `iroh` feature). To manage the connection yourself:
 
 ```rust
 use rustls::pki_types::CertificateDer;
-use wgpu_remote_transport::quic::QuicEndpoint;
+use wgpu_remote::transport::quic::QuicEndpoint;
 
 let ca_cert = CertificateDer::from(std::fs::read("ca-cert.der")?);
 let endpoint = QuicEndpoint::client(ca_cert)?;
 let connection = endpoint.connect(addr, "localhost").await?;
 
-let instance: wgpu::Instance = wgpu_remote_wgpu::install(connection);
+let instance: wgpu::Instance = wgpu_remote::install(connection);
 
 // Everything below is plain wgpu.
 let adapter = instance.request_adapter(&Default::default()).await?;
@@ -175,10 +228,10 @@ Built on wgpu 27's `custom` cargo feature. Unsupported features route through `D
 
 ## Using the facade directly
 
-For async creates, simpler readback (`read_range(..)` / `read_all()`), or to skip the wgpu dispatch indirection, use `wgpu-remote-client` directly:
+For async creates, simpler readback (`read_range(..)` / `read_all()`), or to skip the wgpu dispatch indirection, use the `wgpu_remote::client` facade directly:
 
 ```rust
-use wgpu_remote_client::prelude::quic::*;
+use wgpu_remote::client::prelude::quic::*;
 
 let instance = Instance::new(Client::new(connection));
 let adapter  = instance.request_adapter().await?;
@@ -187,43 +240,44 @@ let buffer = device.create_buffer(&BufferDescriptor { /* ... */ });
 let bytes = readback_buffer.read_all().await?;
 ```
 
-The facade carries a `<C: Connection>` generic at every type; the preludes (`prelude::quic` and `wgpu_remote_tests::prelude::in_memory`) hide it for the shipping transports.
+The facade carries a `<C: Connection>` generic at every type; the `client::prelude::quic` module hides it for the shipping QUIC transport.
 
-## Crates
+## Modules
 
-| Crate                        | Purpose                                                                                   |
-|------------------------------|-------------------------------------------------------------------------------------------|
-| `wgpu-remote-protocol`       | Wire format. Action/Response enums, typed IDs, descriptor mirrors, bincode codec. No I/O. |
-| `wgpu-remote-transport`      | `Transport` + `Connection` traits, quinn-based QUIC impl, private CA (`pki` module).      |
-| `wgpu-remote-transport-iroh` | iroh transport adapter — NAT-traversed QUIC via relay + hole-punching.                    |
-| `wgpu-remote-server`         | Replay engine + server binary.                                                            |
-| `wgpu-remote-client`         | Low-level `Client` + wgpu-shaped facade (`Instance`, `Device`, etc.).                     |
-| `wgpu-remote-wgpu`           | Drop-in for stock `wgpu`: `install(connection) -> wgpu::Instance`.                        |
-| `wgpu-remote-cli`            | Demo / smoke-test CLI (`ping`, `compute-double`, `render-checkerboard`).                  |
-| `wgpu-remote-tests`          | End-to-end tests + in-memory transport.                                                   |
+Everything lives in the single `wgpu-remote` crate. Each module maps to a cargo feature so you only compile what you use.
+
+| Path                        | Feature      | Purpose                                                                                   |
+|-----------------------------|--------------|-------------------------------------------------------------------------------------------|
+| `wgpu_remote` (root)        | `client`     | Entry points: `install`, `connect_quic`, `connect_iroh`.                                   |
+| `wgpu_remote::protocol`     | always       | Wire format. Action/Response enums, typed IDs, descriptor mirrors, bincode codec. No I/O.  |
+| `wgpu_remote::transport`    | always       | `Transport` + `Connection` traits, quinn QUIC impl (`quic`), private CA, iroh (`iroh`).    |
+| `wgpu_remote::client`       | `client`     | Low-level `Client` + wgpu-shaped facade (`Instance`, `Device`, etc.).                      |
+| `wgpu_remote::server`       | `server`     | Replay engine (`Engine`, `run_connection`).                                                |
+| `wgpu-remote-server` (bin)  | `server-bin` | Server binary.                                                                             |
+| `wgpu-remote-cli` (bin)     | `cli`        | Demo / smoke-test CLI (`ping`, `compute-double`, `render-checkerboard`).                   |
 
 ## Certificate management
 
 ```bash
 # Generate a CA (once — keep the key secret)
-cargo run --release -p wgpu-remote-server -- init-ca \
+wgpu-remote-server init-ca \
     --ca-cert ca-cert.der --ca-key ca-key.der
 
 # Start the server — loads the CA and issues its own server cert
-cargo run --release -p wgpu-remote-server -- \
+wgpu-remote-server \
     --ca-cert ca-cert.der --ca-key ca-key.der
 
 # If no CA files exist, the server auto-generates one on first start
-cargo run --release -p wgpu-remote-server
+wgpu-remote-server
 
 # For quick testing, --self-signed skips the CA entirely
-cargo run --release -p wgpu-remote-server -- --self-signed
+wgpu-remote-server --self-signed
 ```
 
 Add extra SANs for non-localhost use:
 
 ```bash
-cargo run --release -p wgpu-remote-server -- \
+wgpu-remote-server \
     --ca-cert ca.der --ca-key ca.key \
     --bind 0.0.0.0:4433 \
     --san my-gpu-box.local \
@@ -233,14 +287,14 @@ cargo run --release -p wgpu-remote-server -- \
 ## Tests
 
 ```bash
-cargo test --workspace
+cargo test --all-features
 ```
 
 Notable end-to-end tests:
 
 | Test                                               | What it proves                                                                    |
 |----------------------------------------------------|-----------------------------------------------------------------------------------|
-| `wgpu-remote-protocol::*`                          | Wire format roundtrips.                                                           |
+| `protocol::*`                                      | Wire format roundtrips.                                                           |
 | `engine_buffer` / `engine_compute`                 | Engine dispatches against a real GPU.                                             |
 | `quic_compute`                                     | Compute workload over real QUIC, in-process.                                      |
 | `binary_compute_double`                            | Spawns the server binary, runs a workload over a real socket across OS processes. |
@@ -254,7 +308,7 @@ Notable end-to-end tests:
 ## Status
 
 **Working today:**
-- Drop-in for stock wgpu (compute path) via `wgpu_remote_wgpu::install`
+- Drop-in for stock wgpu (compute path) via `wgpu_remote::install`
 - Buffers (create, write, copy, `map_async` for read)
 - Textures, texture views, samplers
 - Compute pipelines (WGSL shaders) + compute pass dispatch

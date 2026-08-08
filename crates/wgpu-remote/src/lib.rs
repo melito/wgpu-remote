@@ -19,7 +19,9 @@
 //!
 //! ## iroh (NAT-traversed, no certs needed)
 //!
-//! ```rust,no_run
+//! Requires the `iroh` feature.
+//!
+//! ```rust,ignore
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let instance = wgpu_remote::connect_iroh("6c190b769dd5...").await?;
 //!
@@ -48,21 +50,42 @@
 //! # }
 //! ```
 
-use std::net::SocketAddr;
-use std::path::Path;
+/// Wire format shared by client and server.
+pub mod protocol;
+/// Pluggable transport layer (`quic` and `iroh` impls behind their features).
+pub mod transport;
 
-/// Re-export the transport layer for lower-level use.
-pub use wgpu_remote_transport as transport;
+/// wgpu-shaped client facade. Enabled by the `client` feature (default).
+#[cfg(feature = "client")]
+pub mod client;
 
-/// Re-export the iroh transport for lower-level use.
-#[cfg(feature = "iroh")]
-pub use wgpu_remote_transport_iroh as iroh;
+/// Replay engine that executes actions against a real GPU. Enabled by the
+/// `server` feature.
+#[cfg(feature = "server")]
+pub mod server;
 
-/// Build a `wgpu::Instance` from any [`transport::Connection`].
+#[cfg(feature = "client")]
+mod dispatch;
+#[cfg(feature = "client")]
+mod translate;
+
+/// Build a stock [`wgpu::Instance`] backed by the remote GPU on the far end
+/// of `connection`.
 ///
 /// This is the low-level entry point — use [`connect_quic`] or
 /// [`connect_iroh`] for the common cases.
-pub use wgpu_remote_wgpu::install;
+#[cfg(feature = "client")]
+pub fn install<C>(connection: C) -> wgpu::Instance
+where
+    C: transport::Connection + Clone + 'static,
+{
+    wgpu::Instance::from_custom(dispatch::Instance::new(connection))
+}
+
+#[cfg(all(feature = "client", feature = "quic"))]
+use std::net::SocketAddr;
+#[cfg(all(feature = "client", feature = "quic"))]
+use std::path::Path;
 
 /// Connect to a wgpu-remote server over QUIC and return a `wgpu::Instance`.
 ///
@@ -75,13 +98,13 @@ pub use wgpu_remote_wgpu::install;
 /// # Ok(())
 /// # }
 /// ```
-#[cfg(feature = "quic")]
+#[cfg(all(feature = "client", feature = "quic"))]
 pub async fn connect_quic(
     addr: &str,
     ca_cert_path: impl AsRef<Path>,
 ) -> Result<wgpu::Instance, Error> {
     use rustls::pki_types::CertificateDer;
-    use wgpu_remote_transport::quic::QuicEndpoint;
+    use crate::transport::quic::QuicEndpoint;
 
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -108,14 +131,14 @@ pub async fn connect_quic(
 /// for TLS verification.
 ///
 /// Use this when the server cert has a SAN other than `localhost`.
-#[cfg(feature = "quic")]
+#[cfg(all(feature = "client", feature = "quic"))]
 pub async fn connect_quic_with_server_name(
     addr: &str,
     ca_cert_path: impl AsRef<Path>,
     server_name: &str,
 ) -> Result<wgpu::Instance, Error> {
     use rustls::pki_types::CertificateDer;
-    use wgpu_remote_transport::quic::QuicEndpoint;
+    use crate::transport::quic::QuicEndpoint;
 
     let _ = rustls::crypto::ring::default_provider().install_default();
 
@@ -149,10 +172,10 @@ pub async fn connect_quic_with_server_name(
 /// # Ok(())
 /// # }
 /// ```
-#[cfg(feature = "iroh")]
+#[cfg(all(feature = "client", feature = "iroh"))]
 pub async fn connect_iroh(endpoint_id: &str) -> Result<wgpu::Instance, Error> {
-    use wgpu_remote_transport::Transport;
-    use wgpu_remote_transport_iroh::{EndpointAddr, IrohEndpoint};
+    use crate::transport::Transport;
+    use crate::transport::iroh::{EndpointAddr, IrohEndpoint};
 
     let _ = rustls::crypto::ring::default_provider().install_default();
 

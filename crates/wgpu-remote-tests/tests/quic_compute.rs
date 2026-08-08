@@ -9,8 +9,8 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use wgpu_remote_client::Client;
-use wgpu_remote_protocol::{
+use wgpu_remote::client::Client;
+use wgpu_remote::protocol::{
     Action, Response,
     commands::{CommandBufferRecording, ComputeCommand, EncoderCommand},
     descriptors::{
@@ -23,8 +23,8 @@ use wgpu_remote_protocol::{
         ShaderModuleId,
     },
 };
-use wgpu_remote_server::{Engine, run_connection};
-use wgpu_remote_transport::quic::QuicEndpoint;
+use wgpu_remote::server::{Engine, run_connection};
+use wgpu_remote::transport::quic::QuicEndpoint;
 use wgpu_types::{
     BindGroupLayoutEntry, BindingType, BufferBindingType, BufferUsages, ShaderStages,
 };
@@ -38,7 +38,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 }
 "#;
 
-async fn ok(client: &Client<impl wgpu_remote_transport::Connection + Clone>, action: Action) {
+async fn ok(client: &Client<impl wgpu_remote::transport::Connection + Clone>, action: Action) {
     match client.request(action).await.expect("client request") {
         Response::Ok => {}
         other => panic!("expected Ok, got {other:?}"),

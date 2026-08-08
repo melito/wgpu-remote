@@ -3,14 +3,14 @@
 //! GPU dispatch path. Requires a working wgpu backend (Metal on macOS).
 
 use bytes::Bytes;
-use wgpu_remote_protocol::{
+use wgpu_remote::protocol::{
     Response,
     actions::{Action, Frame, RequestId},
     descriptors::BufferDescriptor,
     ids::BufferId,
     responses::ErrorCode,
 };
-use wgpu_remote_server::Engine;
+use wgpu_remote::server::Engine;
 use wgpu_types::BufferUsages;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
