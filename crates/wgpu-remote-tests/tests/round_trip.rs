@@ -1,14 +1,14 @@
 //! End-to-end: protocol frames over the in-memory transport.
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use wgpu_remote_protocol::{
+use wgpu_remote::protocol::{
     Action, PROTOCOL_VERSION, Response,
     actions::{Frame, RequestId},
     codec::{decode_frame, encode_frame},
     responses::ResponseFrame,
 };
 use wgpu_remote_tests::pair;
-use wgpu_remote_transport::Connection;
+use wgpu_remote::transport::Connection;
 
 /// Reads bytes for one length-prefixed frame. Returns `(len_bytes, body_bytes)`
 /// concatenated so [`decode_frame`] can parse the whole thing.

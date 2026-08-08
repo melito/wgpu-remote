@@ -2,13 +2,6 @@
 resolver = "3"
 members = [
     "crates/wgpu-remote",
-    "crates/wgpu-remote-protocol",
-    "crates/wgpu-remote-transport",
-    "crates/wgpu-remote-transport-iroh",
-    "crates/wgpu-remote-client",
-    "crates/wgpu-remote-wgpu",
-    "crates/wgpu-remote-cli",
-    "crates/wgpu-remote-server",
     "crates/wgpu-remote-tests",
 ]
 
@@ -20,16 +13,6 @@ license = "MIT"
 repository = "https://github.com/melito/wgpu-remote"
 
 [workspace.dependencies]
-# Internal — `path` is used locally, `version` is used when publishing to crates.io
-wgpu-remote-protocol = { version = "0.1.0", path = "crates/wgpu-remote-protocol" }
-wgpu-remote-transport = { version = "0.1.0", path = "crates/wgpu-remote-transport" }
-wgpu-remote-transport-iroh = { version = "0.1.0", path = "crates/wgpu-remote-transport-iroh" }
-wgpu-remote-client = { version = "0.1.0", path = "crates/wgpu-remote-client" }
-wgpu-remote-wgpu = { version = "0.1.0", path = "crates/wgpu-remote-wgpu" }
-wgpu-remote-cli = { version = "0.1.0", path = "crates/wgpu-remote-cli" }
-wgpu-remote-server = { version = "0.1.0", path = "crates/wgpu-remote-server" }
-wgpu-remote-tests = { path = "crates/wgpu-remote-tests" }
-
 # Pin wgpu — client and server MUST agree on this exact version
 wgpu = "27"
 wgpu-types = { version = "27", features = ["serde"] }

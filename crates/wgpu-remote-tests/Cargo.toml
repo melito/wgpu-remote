@@ -9,13 +9,15 @@ description = "End-to-end tests for wgpu-remote, including an in-memory transpor
 publish = false
 
 [dependencies]
-wgpu-remote-protocol.workspace = true
-wgpu-remote-transport.workspace = true
-wgpu-remote-client.workspace = true
-wgpu-remote-server.workspace = true
+wgpu-remote = { path = "../wgpu-remote", features = ["client", "server", "quic", "iroh"] }
 tokio = { workspace = true, features = ["time"] }
 futures-util.workspace = true
 anyhow.workspace = true
 bytes.workspace = true
 wgpu-types.workspace = true
 rustls.workspace = true
+
+[dev-dependencies]
+# The wgpu drop-in tests drive the public `wgpu` API directly.
+wgpu.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

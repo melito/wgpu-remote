@@ -6,17 +6,61 @@ rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Run wgpu workloads on a GPU that lives on another machine."
+readme = "../../README.md"
+keywords = ["wgpu", "gpu", "remote", "quic", "iroh"]
+categories = ["graphics", "network-programming"]
 
 [features]
-default = ["quic", "iroh"]
-quic = ["wgpu-remote-transport/quic"]
-iroh = ["dep:wgpu-remote-transport-iroh"]
+default = ["client", "quic"]
+# wgpu-shaped client facade + drop-in (`install`, `connect_quic`, `connect_iroh`).
+client = ["dep:wgpu"]
+# Replay engine as a library (`wgpu_remote::server`).
+server = ["dep:wgpu", "dep:anyhow"]
+# quinn-based QUIC transport + private CA.
+quic = ["dep:quinn", "dep:rustls", "dep:rcgen"]
+# iroh transport — NAT-traversed QUIC.
+iroh = ["dep:iroh", "dep:rustls"]
+# `wgpu-remote-server` binary (both transports).
+server-bin = ["server", "quic", "iroh"]
+# `wgpu-remote-cli` demo binary (both transports).
+cli = ["client", "quic", "iroh", "dep:anyhow"]
+
+[[bin]]
+name = "wgpu-remote-server"
+path = "src/bin/wgpu-remote-server.rs"
+required-features = ["server-bin"]
+
+[[bin]]
+name = "wgpu-remote-cli"
+path = "src/bin/wgpu-remote-cli.rs"
+required-features = ["cli"]
 
 [dependencies]
-wgpu-remote-wgpu.workspace = true
-wgpu-remote-transport.workspace = true
-wgpu-remote-transport-iroh = { workspace = true, optional = true }
-wgpu.workspace = true
-rustls = { workspace = true }
-tokio.workspace = true
+# Always: wire format + transport core.
+serde.workspace = true
+bincode.workspace = true
+bytes.workspace = true
 thiserror.workspace = true
+wgpu-types.workspace = true
+tokio.workspace = true
+
+# Real wgpu — client drop-in (custom instance) and server (real GPU).
+wgpu = { workspace = true, features = ["custom"], optional = true }
+
+# QUIC transport.
+quinn = { workspace = true, optional = true }
+rustls = { workspace = true, optional = true }
+rcgen = { workspace = true, optional = true }
+
+# iroh transport.
+iroh = { version = "1.0.0-rc.1", optional = true }
+
+# Binaries.
+anyhow = { workspace = true, optional = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "process"] }
+anyhow.workspace = true
+# iroh transport tests spin up a local relay.
+iroh-relay = { version = "1.0.0-rc.1", features = ["server", "test-utils"] }
+sha1 = "0.11.0-rc.5"

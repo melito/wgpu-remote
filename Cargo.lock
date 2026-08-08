@@ -3889,9 +3889,9 @@ dependencies = [
 
 [[package]]
 name = "spin"
-version = "0.10.0"
+version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d5fe4ccb98d9c292d56fec89a5e07da7fc4cf0dc11e156b41793132775d3e591"
+checksum = "023a211cb3138dbc438680b32560ad89f699977624c9f8dbb95a47d5b4c07dd3"
 
 [[package]]
 name = "spirv"
@@ -4877,70 +4877,19 @@ dependencies = [
 name = "wgpu-remote"
 version = "0.1.0"
 dependencies = [
- "rustls",
- "thiserror 2.0.18",
- "tokio",
- "wgpu",
- "wgpu-remote-transport",
- "wgpu-remote-transport-iroh",
- "wgpu-remote-wgpu",
-]
-
-[[package]]
-name = "wgpu-remote-cli"
-version = "0.1.0"
-dependencies = [
  "anyhow",
+ "bincode",
  "bytes",
+ "iroh",
+ "iroh-relay",
+ "quinn",
+ "rcgen 0.13.2",
  "rustls",
- "tokio",
- "wgpu-remote-client",
- "wgpu-remote-protocol",
- "wgpu-remote-transport",
- "wgpu-remote-transport-iroh",
- "wgpu-types",
-]
-
-[[package]]
-name = "wgpu-remote-client"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "bytes",
- "thiserror 2.0.18",
- "tokio",
- "wgpu",
- "wgpu-remote-protocol",
- "wgpu-remote-transport",
- "wgpu-remote-transport-iroh",
- "wgpu-types",
-]
-
-[[package]]
-name = "wgpu-remote-protocol"
-version = "0.1.0"
-dependencies = [
- "bincode",
- "bytes",
  "serde",
- "thiserror 2.0.18",
- "wgpu-types",
-]
-
-[[package]]
-name = "wgpu-remote-server"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "rustls",
+ "sha1",
  "thiserror 2.0.18",
  "tokio",
  "wgpu",
- "wgpu-remote-client",
- "wgpu-remote-protocol",
- "wgpu-remote-transport",
- "wgpu-remote-transport-iroh",
  "wgpu-types",
 ]
 
@@ -4953,53 +4902,8 @@ dependencies = [
  "futures-util",
  "rustls",
  "tokio",
- "wgpu-remote-client",
- "wgpu-remote-protocol",
- "wgpu-remote-server",
- "wgpu-remote-transport",
- "wgpu-types",
-]
-
-[[package]]
-name = "wgpu-remote-transport"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures-util",
- "quinn",
- "rcgen 0.13.2",
- "rustls",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "wgpu-remote-transport-iroh"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures-util",
- "iroh",
- "iroh-relay",
- "sha1",
- "thiserror 2.0.18",
- "tokio",
- "wgpu-remote-transport",
-]
-
-[[package]]
-name = "wgpu-remote-wgpu"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "bytes",
- "tokio",
  "wgpu",
- "wgpu-remote-client",
- "wgpu-remote-protocol",
- "wgpu-remote-server",
- "wgpu-remote-tests",
- "wgpu-remote-transport",
+ "wgpu-remote",
  "wgpu-types",
 ]
 

@@ -5,7 +5,7 @@
 use std::num::NonZeroU64;
 
 use bytes::Bytes;
-use wgpu_remote_server::{Engine, run_connection};
+use wgpu_remote::server::{Engine, run_connection};
 use wgpu_remote_tests::prelude::in_memory::*;
 
 const DOUBLE_SHADER: &str = r#"

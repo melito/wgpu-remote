@@ -9,8 +9,8 @@
 use bytes::Bytes;
 use std::sync::Arc;
 
-use wgpu_remote_client::{BufferUsages, Client, Instance, descriptors::BufferDescriptor};
-use wgpu_remote_server::{Engine, run_connection};
+use wgpu_remote::client::{BufferUsages, Client, Instance, descriptors::BufferDescriptor};
+use wgpu_remote::server::{Engine, run_connection};
 use wgpu_remote_tests::pair;
 
 const N: usize = 32;

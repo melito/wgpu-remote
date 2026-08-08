@@ -9,7 +9,7 @@
 //! visible here — only the wgpu-shaped facade types.
 
 use bytes::Bytes;
-use wgpu_remote_client::{
+use wgpu_remote::client::{
     BufferUsages, Client, ColorAttachment, Instance, RenderPassDescriptor,
     descriptors::{
         BufferDescriptor, FragmentState, PipelineLayoutDescriptor, RenderPipelineDescriptor,
@@ -17,7 +17,7 @@ use wgpu_remote_client::{
         VertexState,
     },
 };
-use wgpu_remote_server::{Engine, run_connection};
+use wgpu_remote::server::{Engine, run_connection};
 use wgpu_remote_tests::pair;
 use wgpu_types::{
     Color, ColorTargetState, ColorWrites, Extent3d, LoadOp, MultisampleState, Operations,
