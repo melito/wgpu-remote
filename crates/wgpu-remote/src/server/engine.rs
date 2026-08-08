@@ -642,12 +642,6 @@ impl Engine {
                 }
                 Ok(())
             }
-            // The enum is non_exhaustive; a future variant added without a
-            // matching arm should fail loudly rather than be misinterpreted.
-            _ => Err(Response::Error {
-                code: ErrorCode::InvalidArgument,
-                message: "unknown encoder command variant — protocol/server version skew?".into(),
-            }),
         }
     }
 
@@ -730,10 +724,6 @@ impl Engine {
                 pass.draw_indexed(indices, base_vertex, instances);
                 Ok(())
             }
-            _ => Err(Response::Error {
-                code: ErrorCode::InvalidArgument,
-                message: "unknown render command variant — protocol/server version skew?".into(),
-            }),
         }
     }
 
@@ -782,10 +772,6 @@ impl Engine {
                 pass.dispatch_workgroups_indirect(b, indirect_offset);
                 Ok(())
             }
-            _ => Err(Response::Error {
-                code: ErrorCode::InvalidArgument,
-                message: "unknown compute command variant — protocol/server version skew?".into(),
-            }),
         }
     }
 
