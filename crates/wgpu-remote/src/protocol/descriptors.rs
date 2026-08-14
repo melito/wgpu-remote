@@ -14,9 +14,13 @@
 use serde::{Deserialize, Serialize};
 use wgpu_types::{
     BindGroupLayoutEntry, BufferAddress, BufferSize, ColorTargetState, DepthStencilState,
-    MultisampleState, PrimitiveState, PushConstantRange, ShaderStages, TextureAspect,
-    TextureFormat, TextureUsages, TextureViewDimension, VertexAttribute, VertexStepMode,
+    MultisampleState, PrimitiveState, ShaderStages, TextureAspect, TextureFormat, TextureUsages,
+    TextureViewDimension, VertexAttribute, VertexStepMode,
 };
+// wgpu 29 removed push-constants (folded into "immediates", which carry no
+// range type). The wire descriptor keeps the field only on 27.
+#[cfg(feature = "wgpu-27")]
+use wgpu_types::PushConstantRange;
 
 use crate::protocol::ids::{
     BindGroupLayoutId, BufferId, PipelineLayoutId, SamplerId, ShaderModuleId, TextureViewId,
@@ -97,6 +101,7 @@ pub struct BindGroupDescriptor {
 pub struct PipelineLayoutDescriptor {
     pub label: Option<String>,
     pub bind_group_layouts: Vec<BindGroupLayoutId>,
+    #[cfg(feature = "wgpu-27")]
     pub push_constant_ranges: Vec<PushConstantRange>,
 }
 

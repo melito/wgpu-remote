@@ -50,6 +50,26 @@
 //! # }
 //! ```
 
+// ── wgpu version selection ──────────────────────────────────────────────────
+// Exactly one version feature aliases its renamed dep to the bare `wgpu` /
+// `wgpu_types` names the whole crate uses, via the extern prelude. So all the
+// ordinary `wgpu::…` / `wgpu_types::…` code is version-agnostic, and only the
+// few spots that touch parts of wgpu's custom-backend API that CHANGED between
+// releases need a `#[cfg(feature = "wgpu-NN")]` branch.
+#[cfg(feature = "wgpu-27")]
+extern crate wgpu_27 as wgpu;
+#[cfg(feature = "wgpu-27")]
+extern crate wgpu_types_27 as wgpu_types;
+#[cfg(feature = "wgpu-29")]
+extern crate wgpu_29 as wgpu;
+#[cfg(feature = "wgpu-29")]
+extern crate wgpu_types_29 as wgpu_types;
+
+#[cfg(not(any(feature = "wgpu-27", feature = "wgpu-29")))]
+compile_error!("wgpu-remote: enable exactly one wgpu version feature — `wgpu-27` or `wgpu-29`");
+#[cfg(all(feature = "wgpu-27", feature = "wgpu-29"))]
+compile_error!("wgpu-remote: enable only ONE wgpu version feature, not both");
+
 /// Wire format shared by client and server.
 pub mod protocol;
 /// Pluggable transport layer (`quic` and `iroh` impls behind their features).

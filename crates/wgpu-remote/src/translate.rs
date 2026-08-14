@@ -286,14 +286,27 @@ fn binding_resource<C: Connection + Clone + 'static>(
 pub(crate) fn pipeline_layout_descriptor<C: Connection + Clone + 'static>(
     desc: &wgpu::PipelineLayoutDescriptor<'_>,
 ) -> Result<ProtoPipelineLayoutDescriptor, TranslateError> {
+    // wgpu 29 made the layout list sparse: `&[Option<&BindGroupLayout>]`.
+    #[cfg(feature = "wgpu-27")]
     let bind_group_layouts = desc
         .bind_group_layouts
         .iter()
         .map(|l| bind_group_layout_id::<C>(l))
         .collect::<Result<Vec<_>, TranslateError>>()?;
+    #[cfg(feature = "wgpu-29")]
+    let bind_group_layouts = desc
+        .bind_group_layouts
+        .iter()
+        .map(|slot| match slot {
+            Some(l) => bind_group_layout_id::<C>(l),
+            None => Err(TranslateError::ForeignResource("bind group layout (empty slot)")),
+        })
+        .collect::<Result<Vec<_>, TranslateError>>()?;
     Ok(ProtoPipelineLayoutDescriptor {
         label: own_label(desc.label),
         bind_group_layouts,
+        // wgpu 29 dropped push-constant ranges from the pipeline layout.
+        #[cfg(feature = "wgpu-27")]
         push_constant_ranges: desc.push_constant_ranges.to_vec(),
     })
 }
@@ -356,8 +369,13 @@ pub(crate) fn render_pipeline_descriptor<C: Connection + Clone + 'static>(
             Some(f) => Some(fragment_state::<C>(f)?),
             None => None,
         },
-        // wgpu uses Option<NonZeroU32>; the protocol stores Option<u32>.
+        // wgpu uses Option<NonZeroU32>; the protocol stores Option<u32>. wgpu 29
+        // moved multiview off the pipeline (onto the render pass), so there's
+        // nothing to carry from the pipeline descriptor there.
+        #[cfg(feature = "wgpu-27")]
         multiview: desc.multiview.map(|n| n.get()),
+        #[cfg(feature = "wgpu-29")]
+        multiview: None,
     })
 }
 

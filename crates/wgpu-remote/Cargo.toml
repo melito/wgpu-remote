@@ -11,11 +11,21 @@ keywords = ["wgpu", "gpu", "remote", "quic", "iroh"]
 categories = ["graphics", "network-programming"]
 
 [features]
-default = ["client", "quic"]
+default = ["wgpu-27", "client", "quic"]
+
+# ── wgpu version — pick EXACTLY ONE ─────────────────────────────────────────
+# The wire descriptors use `wgpu-types` and the client/server touch `wgpu`'s
+# custom-backend API, so both are version-selected. The chosen version feature
+# aliases its `wgpu`/`wgpu-types` to the bare names the crate uses (see `lib.rs`),
+# so a consumer on wgpu 27 or 29 opts in without the crate carrying two copies.
+wgpu-27 = ["dep:wgpu-27", "dep:wgpu-types-27"]
+wgpu-29 = ["dep:wgpu-29", "dep:wgpu-types-29"]
+
 # wgpu-shaped client facade + drop-in (`install`, `connect_quic`, `connect_iroh`).
-client = ["dep:wgpu"]
+# Needs a wgpu version feature (the drop-in speaks wgpu's custom backend).
+client = []
 # Replay engine as a library (`wgpu_remote::server`).
-server = ["dep:wgpu", "dep:anyhow"]
+server = ["dep:anyhow"]
 # quinn-based QUIC transport + private CA.
 quic = ["dep:quinn", "dep:rustls", "dep:rcgen"]
 # iroh transport — NAT-traversed QUIC.
@@ -41,11 +51,17 @@ serde.workspace = true
 bincode.workspace = true
 bytes.workspace = true
 thiserror.workspace = true
-wgpu-types.workspace = true
 tokio.workspace = true
 
-# Real wgpu — client drop-in (custom instance) and server (real GPU).
-wgpu = { workspace = true, features = ["custom"], optional = true }
+# wgpu-types — the serializable wire descriptors, version-selected. Aliased to
+# the bare `wgpu_types` name by the active version feature (see `lib.rs`).
+wgpu-types-27 = { package = "wgpu-types", version = "27", features = ["serde"], optional = true }
+wgpu-types-29 = { package = "wgpu-types", version = "29", features = ["serde"], optional = true }
+
+# Real wgpu — client drop-in (custom instance) and server (real GPU),
+# version-selected. Aliased to the bare `wgpu` name by the active version feature.
+wgpu-27 = { package = "wgpu", version = "27", features = ["custom"], optional = true }
+wgpu-29 = { package = "wgpu", version = "29", features = ["custom"], optional = true }
 
 # QUIC transport.
 quinn = { workspace = true, optional = true }
