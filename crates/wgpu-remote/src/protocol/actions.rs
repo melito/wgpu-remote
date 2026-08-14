@@ -9,6 +9,7 @@ use crate::protocol::descriptors::{
     SamplerDescriptor, ShaderModuleDescriptor, TextureDescriptor, TextureViewDescriptor,
 };
 use crate::protocol::ids::*;
+use wgpu_types::{Extent3d, Origin3d, TexelCopyBufferLayout, TextureAspect};
 
 /// Correlates a request with its [`Response`](crate::protocol::Response). Client-minted,
 /// monotonic. `None` is allowed for fire-and-forget actions.
@@ -96,6 +97,35 @@ pub enum Action {
         buffer: BufferId,
         offset: u64,
         data: Bytes,
+    },
+
+    /// Upload bytes into a texture subresource. Mirrors `Queue::write_texture`:
+    /// `mip_level`/`origin`/`aspect` pick the subresource, `data_layout`
+    /// describes the source byte packing, `size` the copy extent.
+    WriteTexture {
+        texture: TextureId,
+        mip_level: u32,
+        origin: Origin3d,
+        aspect: TextureAspect,
+        data: Bytes,
+        data_layout: TexelCopyBufferLayout,
+        size: Extent3d,
+    },
+
+    /// Derive a bind-group layout from a render pipeline's layout (auto or
+    /// explicit) at `index`, storing it under the client-minted `id`. Backs
+    /// `RenderPipeline::get_bind_group_layout`.
+    DeriveRenderPipelineBindGroupLayout {
+        pipeline: RenderPipelineId,
+        index: u32,
+        id: BindGroupLayoutId,
+    },
+    /// Same as above for a compute pipeline. Backs
+    /// `ComputePipeline::get_bind_group_layout`.
+    DeriveComputePipelineBindGroupLayout {
+        pipeline: ComputePipelineId,
+        index: u32,
+        id: BindGroupLayoutId,
     },
 
     // ---- Submission ----

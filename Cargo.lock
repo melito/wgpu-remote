@@ -5176,7 +5176,7 @@ dependencies = [
 
 [[package]]
 name = "wgpu-remote"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -5198,7 +5198,7 @@ dependencies = [
 
 [[package]]
 name = "wgpu-remote-tests"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bytes",
