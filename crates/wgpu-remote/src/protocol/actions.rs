@@ -120,6 +120,13 @@ pub enum Action {
         index: u32,
         id: BindGroupLayoutId,
     },
+    /// Same as above for a compute pipeline. Backs
+    /// `ComputePipeline::get_bind_group_layout`.
+    DeriveComputePipelineBindGroupLayout {
+        pipeline: ComputePipelineId,
+        index: u32,
+        id: BindGroupLayoutId,
+    },
 
     // ---- Submission ----
     /// Submit pre-encoded command buffers. The recording payload is an opaque

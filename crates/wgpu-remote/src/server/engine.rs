@@ -228,6 +228,28 @@ impl Engine {
                 }
             }
 
+            Action::DeriveComputePipelineBindGroupLayout {
+                pipeline,
+                index,
+                id,
+            } => {
+                let mut tables = self.tables.lock().unwrap();
+                let derived = tables
+                    .compute_pipelines
+                    .get(&pipeline)
+                    .map(|cp| cp.get_bind_group_layout(index));
+                match derived {
+                    Some(bgl) => {
+                        tables.bind_group_layouts.insert(id, bgl);
+                        Some(Response::Ok)
+                    }
+                    None => Some(Response::Error {
+                        code: ErrorCode::UnknownResource,
+                        message: format!("unknown ComputePipelineId({})", pipeline.raw()),
+                    }),
+                }
+            }
+
             Action::CreateShaderModule { id, desc } => Some(self.create_shader_module(id, desc)),
 
             Action::CreateBindGroupLayout { id, desc } => {

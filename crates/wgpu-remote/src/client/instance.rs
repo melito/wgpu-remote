@@ -182,7 +182,7 @@ impl<C: Connection + Clone + 'static> Device<C> {
         self.inner
             .client
             .send(Action::CreateComputePipeline { id, desc });
-        ComputePipeline::new(id, Arc::clone(&self.inner.client))
+        ComputePipeline::new(id, Arc::clone(&self.inner.client), Arc::clone(&self.inner.ids))
     }
 
     pub fn create_render_pipeline(&self, desc: RenderPipelineDescriptor) -> RenderPipeline<C> {

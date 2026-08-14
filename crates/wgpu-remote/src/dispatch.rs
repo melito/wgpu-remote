@@ -589,15 +589,9 @@ impl<C: Connection + Clone + 'static> std::fmt::Debug for ComputePipeline<C> {
 }
 
 impl<C: Connection + Clone + 'static> ComputePipelineInterface for ComputePipeline<C> {
-    fn get_bind_group_layout(&self, _index: u32) -> DispatchBindGroupLayout {
-        // Pipeline-derived bind group layout introspection isn't supported
-        // yet — the protocol doesn't ferry the per-pipeline layout slots
-        // back to the client. Apps that build their own layouts up-front
-        // (the common case) won't hit this path.
-        unimplemented!(
-            "ComputePipeline::get_bind_group_layout: pipeline-derived layouts \
-             are not yet ferried back from the server"
-        )
+    fn get_bind_group_layout(&self, index: u32) -> DispatchBindGroupLayout {
+        let bgl = self.facade.get_bind_group_layout(index);
+        DispatchBindGroupLayout::custom(BindGroupLayout { facade: bgl })
     }
 }
 

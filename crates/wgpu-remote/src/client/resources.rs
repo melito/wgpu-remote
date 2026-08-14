@@ -194,7 +194,6 @@ resource!(ShaderModule, ShaderModuleInner, ShaderModuleId, ShaderModule);
 resource!(BindGroupLayout, BindGroupLayoutInner, BindGroupLayoutId, BindGroupLayout);
 resource!(BindGroup, BindGroupInner, BindGroupId, BindGroup);
 resource!(PipelineLayout, PipelineLayoutInner, PipelineLayoutId, PipelineLayout);
-resource!(ComputePipeline, ComputePipelineInner, ComputePipelineId, ComputePipeline);
 resource!(Sampler, SamplerInner, SamplerId, Sampler);
 resource!(TextureView, TextureViewInner, TextureViewId, TextureView);
 
@@ -249,6 +248,57 @@ impl<C: Connection + Clone + 'static> Clone for RenderPipeline<C> {
 impl<C: Connection + Clone + 'static> Drop for RenderPipelineInner<C> {
     fn drop(&mut self) {
         spawn_destroy(Arc::clone(&self.client), ResourceId::RenderPipeline(self.id));
+    }
+}
+
+// ComputePipeline is hand-written for the same reason as RenderPipeline:
+// `get_bind_group_layout` needs the shared `IdMinter`.
+
+pub struct ComputePipeline<C: Connection + Clone + 'static> {
+    inner: Arc<ComputePipelineInner<C>>,
+}
+
+struct ComputePipelineInner<C: Connection + Clone + 'static> {
+    id: ComputePipelineId,
+    client: Arc<Client<C>>,
+    ids: Arc<IdMinter>,
+}
+
+impl<C: Connection + Clone + 'static> ComputePipeline<C> {
+    pub(crate) fn new(id: ComputePipelineId, client: Arc<Client<C>>, ids: Arc<IdMinter>) -> Self {
+        Self {
+            inner: Arc::new(ComputePipelineInner { id, client, ids }),
+        }
+    }
+
+    pub fn id(&self) -> ComputePipelineId {
+        self.inner.id
+    }
+
+    /// The pipeline's bind-group layout at `index`. See
+    /// [`RenderPipeline::get_bind_group_layout`].
+    pub fn get_bind_group_layout(&self, index: u32) -> BindGroupLayout<C> {
+        let bgl_id = self.inner.ids.mint_bind_group_layout();
+        self.inner.client.send(Action::DeriveComputePipelineBindGroupLayout {
+            pipeline: self.inner.id,
+            index,
+            id: bgl_id,
+        });
+        BindGroupLayout::new(bgl_id, Arc::clone(&self.inner.client))
+    }
+}
+
+impl<C: Connection + Clone + 'static> Clone for ComputePipeline<C> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<C: Connection + Clone + 'static> Drop for ComputePipelineInner<C> {
+    fn drop(&mut self) {
+        spawn_destroy(Arc::clone(&self.client), ResourceId::ComputePipeline(self.id));
     }
 }
 
