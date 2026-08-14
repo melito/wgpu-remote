@@ -165,11 +165,68 @@ impl Engine {
                 Err(resp) => Some(resp),
             },
 
+            Action::WriteTexture {
+                texture,
+                mip_level,
+                origin,
+                aspect,
+                data,
+                data_layout,
+                size,
+            } => {
+                let tables = self.tables.lock().unwrap();
+                match tables.textures.get(&texture) {
+                    Some(tex) => {
+                        self.queue.write_texture(
+                            wgpu::TexelCopyTextureInfo {
+                                texture: tex,
+                                mip_level,
+                                origin,
+                                aspect,
+                            },
+                            &data,
+                            data_layout,
+                            size,
+                        );
+                        // Flush so the upload is visible before the next
+                        // submit, mirroring WriteBuffer.
+                        self.queue.submit(std::iter::empty());
+                        Some(Response::Ok)
+                    }
+                    None => Some(Response::Error {
+                        code: ErrorCode::UnknownResource,
+                        message: format!("unknown TextureId({})", texture.raw()),
+                    }),
+                }
+            }
+
             Action::MapBufferForRead {
                 buffer,
                 offset,
                 size,
             } => Some(self.read_buffer(buffer, offset, size).await),
+
+            Action::DeriveRenderPipelineBindGroupLayout {
+                pipeline,
+                index,
+                id,
+            } => {
+                let mut tables = self.tables.lock().unwrap();
+                let derived = tables
+                    .render_pipelines
+                    .get(&pipeline)
+                    .map(|rp| rp.get_bind_group_layout(index));
+                match derived {
+                    Some(bgl) => {
+                        tables.bind_group_layouts.insert(id, bgl);
+                        Some(Response::Ok)
+                    }
+                    None => Some(Response::Error {
+                        code: ErrorCode::UnknownResource,
+                        message: format!("unknown RenderPipelineId({})", pipeline.raw()),
+                    }),
+                }
+            }
 
             Action::CreateShaderModule { id, desc } => Some(self.create_shader_module(id, desc)),
 

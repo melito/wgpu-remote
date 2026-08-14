@@ -343,13 +343,23 @@ resource_adapter!(PipelineLayout, FacadePipelineLayout, PipelineLayoutId, Pipeli
 // Buffer, ShaderModule, ComputePipeline, RenderPipeline, Texture have
 // non-empty interfaces — written out below.
 
+/// What a mapped buffer is currently holding.
+///
+/// A *read* map (via `map_async`) caches the bytes fetched from the server so
+/// repeated `get_mapped_range` calls can hand them out. A *write* map (from
+/// `mapped_at_creation`) holds a local zeroed staging buffer the caller writes
+/// its init data into; `unmap` ships that staging back with `Action::WriteBuffer`.
+enum MapState {
+    Read(bytes::Bytes),
+    Write(Vec<u8>),
+}
+
 pub(crate) struct Buffer<C: Connection + Clone + 'static> {
     pub(crate) facade: FacadeBuffer<C>,
-    /// Stores the bytes returned by `map_async`, so subsequent
-    /// `get_mapped_range` calls can hand them to the user. wgpu's lifecycle
-    /// is map → get_mapped_range (potentially repeatedly) → unmap; we
-    /// load the bytes once on map and keep them until unmap.
-    mapped: Arc<StdMutex<Option<bytes::Bytes>>>,
+    /// The buffer's current map, if any. wgpu's lifecycle is map →
+    /// get_mapped_range (potentially repeatedly) → unmap; we hold the state
+    /// from map until unmap.
+    mapped: Arc<StdMutex<Option<MapState>>>,
 }
 
 impl<C: Connection + Clone + 'static> Buffer<C> {
@@ -361,6 +371,16 @@ impl<C: Connection + Clone + 'static> Buffer<C> {
         Self {
             facade,
             mapped: Arc::new(StdMutex::new(None)),
+        }
+    }
+
+    /// A buffer born mapped for write (`mapped_at_creation: true`). Starts with
+    /// a zeroed staging of `size` bytes; the caller fills it via
+    /// `get_mapped_range` and `unmap` ships it to the server.
+    fn new_mapped_at_creation(facade: FacadeBuffer<C>, size: u64) -> Self {
+        Self {
+            facade,
+            mapped: Arc::new(StdMutex::new(Some(MapState::Write(vec![0u8; size as usize])))),
         }
     }
 }
@@ -391,7 +411,7 @@ impl<C: Connection + Clone + 'static> BufferInterface for Buffer<C> {
             let result = facade.read_range(range).await;
             match result {
                 Ok(bytes) => {
-                    *mapped.lock().unwrap() = Some(bytes);
+                    *mapped.lock().unwrap() = Some(MapState::Read(bytes));
                     callback(Ok(()));
                 }
                 Err(_) => {
@@ -405,20 +425,36 @@ impl<C: Connection + Clone + 'static> BufferInterface for Buffer<C> {
         &self,
         sub_range: std::ops::Range<wgpu::wgt::BufferAddress>,
     ) -> DispatchBufferMappedRange {
-        let bytes = self
-            .mapped
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("get_mapped_range called before map_async completed");
         let start = sub_range.start as usize;
         let end = sub_range.end as usize;
-        let slice = bytes.slice(start..end);
-        DispatchBufferMappedRange::custom(BufferMappedRange { bytes: slice })
+        let guard = self.mapped.lock().unwrap();
+        match guard
+            .as_ref()
+            .expect("get_mapped_range called before map_async completed")
+        {
+            // Read map: hand out a cheap refcounted view of the fetched bytes.
+            MapState::Read(bytes) => {
+                let slice = bytes.slice(start..end);
+                DispatchBufferMappedRange::custom(BufferMappedRange::Read(slice))
+            }
+            // Write map: hand out an owned copy of the staging sub-range. The
+            // range flushes back into the staging on drop; `unmap` then ships it.
+            MapState::Write(vec) => DispatchBufferMappedRange::custom(BufferMappedRange::Write {
+                owned: vec[start..end].to_vec(),
+                slot: Arc::clone(&self.mapped),
+                offset: start,
+            }),
+        }
     }
 
     fn unmap(&self) {
-        *self.mapped.lock().unwrap() = None;
+        // A write map (mapped_at_creation) carries staged bytes that only exist
+        // client-side until now — ship them. The server buffer was created with
+        // COPY_DST for exactly this. A read map just drops its cached bytes.
+        let taken = self.mapped.lock().unwrap().take();
+        if let Some(MapState::Write(data)) = taken {
+            self.facade.write_range(0, bytes::Bytes::from(data));
+        }
     }
 
     fn destroy(&self) {
@@ -426,10 +462,19 @@ impl<C: Connection + Clone + 'static> BufferInterface for Buffer<C> {
     }
 }
 
-/// Handed back from `Buffer::get_mapped_range`. Owns its slice so the
-/// user can hold it across awaits without lifetime headaches.
-pub(crate) struct BufferMappedRange {
-    bytes: bytes::Bytes,
+/// Handed back from `Buffer::get_mapped_range`. Owns its data so the user can
+/// hold it across awaits without lifetime headaches.
+pub(crate) enum BufferMappedRange {
+    /// A read map: an immutable, refcounted view of bytes fetched from the server.
+    Read(bytes::Bytes),
+    /// A write map (from `mapped_at_creation`): a local staging copy the caller
+    /// writes into. On drop it flushes back into the owning buffer's map slot,
+    /// which `unmap` then ships to the server.
+    Write {
+        owned: Vec<u8>,
+        slot: Arc<StdMutex<Option<MapState>>>,
+        offset: usize,
+    },
 }
 
 impl std::fmt::Debug for BufferMappedRange {
@@ -439,30 +484,63 @@ impl std::fmt::Debug for BufferMappedRange {
     }
 }
 
+impl Drop for BufferMappedRange {
+    fn drop(&mut self) {
+        // A write range's edits live in `owned`; fold them back into the
+        // buffer's staging so `unmap` ships the final bytes. wgpu guarantees
+        // the range is dropped before `unmap`, so the slot is still Write here.
+        if let BufferMappedRange::Write { owned, slot, offset } = self {
+            if let Some(MapState::Write(vec)) = slot.lock().unwrap().as_mut() {
+                let end = *offset + owned.len();
+                if end <= vec.len() {
+                    vec[*offset..end].copy_from_slice(owned);
+                }
+            }
+        }
+    }
+}
+
 impl wgpu::custom::BufferMappedRangeInterface for BufferMappedRange {
-    // The wire-format readback is a `Bytes` (read-only). Writes through the
-    // mapped range aren't supported yet — that's the write-mapped buffer story.
     #[cfg(feature = "wgpu-27")]
     fn slice(&self) -> &[u8] {
-        &self.bytes
+        match self {
+            BufferMappedRange::Read(b) => b,
+            BufferMappedRange::Write { owned, .. } => owned,
+        }
     }
     #[cfg(feature = "wgpu-27")]
     fn slice_mut(&mut self) -> &mut [u8] {
-        unimplemented!("BufferMappedRange is read-only in the current build")
+        match self {
+            BufferMappedRange::Write { owned, .. } => owned,
+            BufferMappedRange::Read(_) => {
+                unimplemented!("read-mapped buffer range is not writable")
+            }
+        }
     }
 
     // wgpu 29 replaced slice/slice_mut with len + (unsafe) read_slice/write_slice.
     #[cfg(feature = "wgpu-29")]
     fn len(&self) -> usize {
-        self.bytes.len()
+        match self {
+            BufferMappedRange::Read(b) => b.len(),
+            BufferMappedRange::Write { owned, .. } => owned.len(),
+        }
     }
     #[cfg(feature = "wgpu-29")]
     unsafe fn read_slice(&self) -> &[u8] {
-        &self.bytes
+        match self {
+            BufferMappedRange::Read(b) => b,
+            BufferMappedRange::Write { owned, .. } => owned,
+        }
     }
     #[cfg(feature = "wgpu-29")]
     unsafe fn write_slice(&mut self) -> wgpu::WriteOnly<'_, [u8]> {
-        unimplemented!("BufferMappedRange is read-only in the current build")
+        match self {
+            BufferMappedRange::Write { owned, .. } => wgpu::WriteOnly::from_mut(&mut owned[..]),
+            BufferMappedRange::Read(_) => {
+                unimplemented!("read-mapped buffer range is not writable")
+            }
+        }
     }
 }
 
@@ -540,11 +618,9 @@ impl<C: Connection + Clone + 'static> std::fmt::Debug for RenderPipeline<C> {
 }
 
 impl<C: Connection + Clone + 'static> RenderPipelineInterface for RenderPipeline<C> {
-    fn get_bind_group_layout(&self, _index: u32) -> DispatchBindGroupLayout {
-        unimplemented!(
-            "RenderPipeline::get_bind_group_layout: pipeline-derived layouts \
-             are not yet ferried back from the server"
-        )
+    fn get_bind_group_layout(&self, index: u32) -> DispatchBindGroupLayout {
+        let bgl = self.facade.get_bind_group_layout(index);
+        DispatchBindGroupLayout::custom(BindGroupLayout { facade: bgl })
     }
 }
 
@@ -756,10 +832,22 @@ impl<C: Connection + Clone + 'static> DeviceInterface for Device<C> {
     }
 
     fn create_buffer(&self, desc: &wgpu::BufferDescriptor<'_>) -> DispatchBuffer {
-        let buf = self
-            .facade
-            .create_buffer(&translate::buffer_descriptor(desc));
-        DispatchBuffer::custom(Buffer::new(buf))
+        if desc.mapped_at_creation {
+            // The drop-in has no server-side mapped_at_creation. Emulate it:
+            // create a plain buffer the server will accept writes into (+COPY_DST,
+            // flag cleared), keep a local zeroed staging the caller fills, and
+            // ship it on unmap. `wgpu::util::create_buffer_init` rides this path.
+            let mut proto = translate::buffer_descriptor(desc);
+            proto.usage |= wgpu_types::BufferUsages::COPY_DST;
+            proto.mapped_at_creation = false;
+            let buf = self.facade.create_buffer(&proto);
+            DispatchBuffer::custom(Buffer::new_mapped_at_creation(buf, desc.size))
+        } else {
+            let buf = self
+                .facade
+                .create_buffer(&translate::buffer_descriptor(desc));
+            DispatchBuffer::custom(Buffer::new(buf))
+        }
     }
 
     fn create_texture(&self, desc: &wgpu::TextureDescriptor<'_>) -> DispatchTexture {
@@ -950,16 +1038,25 @@ impl<C: Connection + Clone + 'static> QueueInterface for Queue<C> {
 
     fn write_texture(
         &self,
-        _texture: wgpu::wgt::TexelCopyTextureInfo<&wgpu::Texture>,
-        _data: &[u8],
-        _data_layout: wgpu::wgt::TexelCopyBufferLayout,
-        _size: wgpu::wgt::Extent3d,
+        texture: wgpu::wgt::TexelCopyTextureInfo<&wgpu::Texture>,
+        data: &[u8],
+        data_layout: wgpu::wgt::TexelCopyBufferLayout,
+        size: wgpu::wgt::Extent3d,
     ) {
-        // Queue::write_texture is in WebGPU's standard surface — apps
-        // can't degrade around its absence. Until the protocol carries
-        // texture writes, leave as a not-yet-wired marker (distinct
-        // from "unsupported" which routes through the error handler).
-        unimplemented!("Queue::write_texture not yet wired through wgpu-remote-wgpu")
+        let tex = texture
+            .texture
+            .as_custom::<Texture<C>>()
+            .expect("Queue::write_texture received a texture from a different backend");
+        // wgpu hands us a borrow; the facade takes ownership, so copy once.
+        self.facade.write_texture(
+            &tex.facade,
+            texture.mip_level,
+            texture.origin,
+            texture.aspect,
+            bytes::Bytes::copy_from_slice(data),
+            data_layout,
+            size,
+        );
     }
 
     fn submit(
@@ -1037,8 +1134,8 @@ impl<C: Connection + Clone + 'static> QueueInterface for Queue<C> {
 
 use std::sync::Mutex as StdMutex;
 use crate::protocol::commands::{
-    CommandBufferRecording, ComputeCommand, EncoderCommand, RenderCommand,
-    RenderPassColorAttachment as ProtoColorAttachment,
+    CommandBufferRecording, ComputeCommand, EncoderCommand, ImageCopyBuffer, ImageCopyTexture,
+    RenderCommand, RenderPassColorAttachment as ProtoColorAttachment,
     RenderPassDepthStencilAttachment as ProtoDepthAttachment,
 };
 
@@ -1132,11 +1229,31 @@ impl<C: Connection + Clone + 'static> CommandEncoderInterface for CommandEncoder
 
     fn copy_texture_to_buffer(
         &self,
-        _source: wgpu::TexelCopyTextureInfo<'_>,
-        _destination: wgpu::TexelCopyBufferInfo<'_>,
-        _copy_size: wgpu::wgt::Extent3d,
+        source: wgpu::TexelCopyTextureInfo<'_>,
+        destination: wgpu::TexelCopyBufferInfo<'_>,
+        copy_size: wgpu::wgt::Extent3d,
     ) {
-        unimplemented!("copy_texture_to_buffer not yet wired through the wgpu drop-in")
+        let tex = source
+            .texture
+            .as_custom::<Texture<C>>()
+            .expect("copy_texture_to_buffer: foreign source texture");
+        let buf = destination
+            .buffer
+            .as_custom::<Buffer<C>>()
+            .expect("copy_texture_to_buffer: foreign destination buffer");
+        self.inner.push(EncoderCommand::CopyTextureToBuffer {
+            source: ImageCopyTexture {
+                texture: tex.facade.id(),
+                mip_level: source.mip_level,
+                origin: source.origin,
+                aspect: source.aspect,
+            },
+            destination: ImageCopyBuffer {
+                buffer: buf.id(),
+                layout: destination.layout,
+            },
+            copy_size,
+        });
     }
 
     fn copy_texture_to_texture(

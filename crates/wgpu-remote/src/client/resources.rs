@@ -149,6 +149,17 @@ impl<C: Connection + Clone + 'static> Buffer<C> {
     pub async fn read_all(&self) -> Result<Bytes, ClientError> {
         self.read_range(..).await
     }
+
+    /// Upload bytes into this buffer at `offset`. Fire-and-forget, ordered on
+    /// the wire like other actions. The server buffer must allow `COPY_DST`;
+    /// the drop-in's `mapped_at_creation` emulation guarantees that.
+    pub fn write_range(&self, offset: u64, data: Bytes) {
+        self.inner.client.send(Action::WriteBuffer {
+            buffer: self.inner.id,
+            offset,
+            data,
+        });
+    }
 }
 
 fn bounds_to_offset_size<R: RangeBounds<u64>>(range: &R, total: u64) -> (u64, u64) {
@@ -186,7 +197,60 @@ resource!(PipelineLayout, PipelineLayoutInner, PipelineLayoutId, PipelineLayout)
 resource!(ComputePipeline, ComputePipelineInner, ComputePipelineId, ComputePipeline);
 resource!(Sampler, SamplerInner, SamplerId, Sampler);
 resource!(TextureView, TextureViewInner, TextureViewId, TextureView);
-resource!(RenderPipeline, RenderPipelineInner, RenderPipelineId, RenderPipeline);
+
+// RenderPipeline is hand-written (like Texture) because `get_bind_group_layout`
+// must mint a new BindGroupLayoutId via the shared `IdMinter` and ship a
+// DeriveRenderPipelineBindGroupLayout action. The macro doesn't carry IdMinter.
+
+pub struct RenderPipeline<C: Connection + Clone + 'static> {
+    inner: Arc<RenderPipelineInner<C>>,
+}
+
+struct RenderPipelineInner<C: Connection + Clone + 'static> {
+    id: RenderPipelineId,
+    client: Arc<Client<C>>,
+    ids: Arc<IdMinter>,
+}
+
+impl<C: Connection + Clone + 'static> RenderPipeline<C> {
+    pub(crate) fn new(id: RenderPipelineId, client: Arc<Client<C>>, ids: Arc<IdMinter>) -> Self {
+        Self {
+            inner: Arc::new(RenderPipelineInner { id, client, ids }),
+        }
+    }
+
+    pub fn id(&self) -> RenderPipelineId {
+        self.inner.id
+    }
+
+    /// The pipeline's bind-group layout at `index`. Sync — mints a fresh id and
+    /// ships a derive action; the server calls `get_bind_group_layout` on the
+    /// real pipeline and stores the result under that id. Ordering on the
+    /// multiplexed stream guarantees any later reference to the id resolves.
+    pub fn get_bind_group_layout(&self, index: u32) -> BindGroupLayout<C> {
+        let bgl_id = self.inner.ids.mint_bind_group_layout();
+        self.inner.client.send(Action::DeriveRenderPipelineBindGroupLayout {
+            pipeline: self.inner.id,
+            index,
+            id: bgl_id,
+        });
+        BindGroupLayout::new(bgl_id, Arc::clone(&self.inner.client))
+    }
+}
+
+impl<C: Connection + Clone + 'static> Clone for RenderPipeline<C> {
+    fn clone(&self) -> Self {
+        Self {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<C: Connection + Clone + 'static> Drop for RenderPipelineInner<C> {
+    fn drop(&mut self) {
+        spawn_destroy(Arc::clone(&self.client), ResourceId::RenderPipeline(self.id));
+    }
+}
 
 // Texture is hand-written because it needs `create_view`, which must mint a
 // new TextureViewId via the shared `IdMinter` and ship a CreateTextureView

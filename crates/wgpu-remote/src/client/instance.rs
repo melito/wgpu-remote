@@ -190,7 +190,7 @@ impl<C: Connection + Clone + 'static> Device<C> {
         self.inner
             .client
             .send(Action::CreateRenderPipeline { id, desc });
-        RenderPipeline::new(id, Arc::clone(&self.inner.client))
+        RenderPipeline::new(id, Arc::clone(&self.inner.client), Arc::clone(&self.inner.ids))
     }
 
     pub fn create_texture(&self, desc: &TextureDescriptor) -> Texture<C> {
@@ -236,6 +236,30 @@ impl<C: Connection + Clone + 'static> Queue<C> {
             buffer: buffer.id(),
             offset,
             data,
+        });
+    }
+
+    /// Schedule a texture write. Sync — fire-and-forget, ordered relative to
+    /// subsequent actions, exactly like [`write_buffer`](Self::write_buffer).
+    #[allow(clippy::too_many_arguments)]
+    pub fn write_texture(
+        &self,
+        texture: &Texture<C>,
+        mip_level: u32,
+        origin: wgpu_types::Origin3d,
+        aspect: wgpu_types::TextureAspect,
+        data: bytes::Bytes,
+        data_layout: wgpu_types::TexelCopyBufferLayout,
+        size: wgpu_types::Extent3d,
+    ) {
+        self.inner.client.send(Action::WriteTexture {
+            texture: texture.id(),
+            mip_level,
+            origin,
+            aspect,
+            data,
+            data_layout,
+            size,
         });
     }
 
