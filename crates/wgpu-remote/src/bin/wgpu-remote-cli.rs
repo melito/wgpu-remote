@@ -16,6 +16,13 @@ use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+// Binaries are their own compilation unit, so they don't inherit the lib's
+// `extern crate … as wgpu_types` alias — re-establish it here.
+#[cfg(feature = "wgpu-27")]
+extern crate wgpu_types_27 as wgpu_types;
+#[cfg(feature = "wgpu-29")]
+extern crate wgpu_types_29 as wgpu_types;
+
 use bytes::Bytes;
 use rustls::pki_types::CertificateDer;
 use wgpu_remote::protocol::{Action, PROTOCOL_VERSION, Response};
@@ -355,6 +362,7 @@ async fn compute_double<C: Connection + Clone + 'static>(
     let pipeline_layout = device.create_pipeline_layout(descriptors::PipelineLayoutDescriptor {
         label: Some("compute-layout".into()),
         bind_group_layouts: vec![bgl.id()],
+        #[cfg(feature = "wgpu-27")]
         push_constant_ranges: vec![],
     });
 
@@ -536,6 +544,7 @@ async fn render_checkerboard<C: Connection + Clone + 'static>(
     let pipeline_layout = device.create_pipeline_layout(descriptors::PipelineLayoutDescriptor {
         label: Some("checker-layout".into()),
         bind_group_layouts: vec![bgl.id()],
+        #[cfg(feature = "wgpu-27")]
         push_constant_ranges: vec![],
     });
     let shader = device.create_shader_module(descriptors::ShaderModuleDescriptor {

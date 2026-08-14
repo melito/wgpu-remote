@@ -76,18 +76,45 @@ impl<C: Connection + Clone + 'static> std::fmt::Debug for Instance<C> {
 }
 
 impl<C: Connection + Clone + 'static> InstanceInterface for Instance<C> {
+    // Reachable only via `wgpu::Instance::new(...)`, which constructs *some*
+    // backend by descriptor. Users of this crate come in via
+    // `crate::install(connection)` instead — there's no connection to synthesize
+    // from a descriptor alone. (wgpu 29 takes the descriptor by value.)
+    #[cfg(feature = "wgpu-27")]
     fn new(_desc: &wgpu::InstanceDescriptor) -> Self
     where
         Self: Sized,
     {
-        // Reachable only via `wgpu::Instance::new(...)`, which constructs
-        // *some* backend by descriptor. Users of this crate come in via
-        // `crate::install(connection)` instead — there's no connection to
-        // synthesize from a descriptor alone.
         panic!(
             "wgpu_remote::Instance cannot be constructed via wgpu::Instance::new(); \
              use wgpu_remote::install(connection) instead"
         );
+    }
+    #[cfg(feature = "wgpu-29")]
+    fn new(_desc: wgpu::InstanceDescriptor) -> Self
+    where
+        Self: Sized,
+    {
+        panic!(
+            "wgpu_remote::Instance cannot be constructed via wgpu::Instance::new(); \
+             use wgpu_remote::install(connection) instead"
+        );
+    }
+
+    // wgpu 29 added enumeration. We back a single remote adapter, so this yields
+    // it (or nothing) rather than probing local backends.
+    #[cfg(feature = "wgpu-29")]
+    fn enumerate_adapters(
+        &self,
+        _backends: wgpu::Backends,
+    ) -> std::pin::Pin<Box<dyn wgpu::custom::EnumerateAdapterFuture>> {
+        let facade = Arc::clone(&self.facade);
+        Box::pin(async move {
+            match facade.request_adapter().await {
+                Ok(a) => vec![DispatchAdapter::custom(Adapter { facade: Arc::new(a) })],
+                Err(_) => Vec::new(),
+            }
+        })
     }
 
     unsafe fn create_surface(
@@ -158,6 +185,31 @@ impl<C: Connection + Clone + 'static> std::fmt::Debug for Adapter<C> {
     }
 }
 
+/// A synthetic `AdapterInfo` for the single remote adapter — shared by
+/// `AdapterInterface::get_info` and (wgpu 29) `DeviceInterface::adapter_info`. The
+/// fields wgpu 29 added are `#[cfg]`-gated so one literal serves both versions.
+fn remote_adapter_info() -> wgpu::AdapterInfo {
+    // wgpu 27 has no `Backend::Custom`; `Noop` is the closest fit — signals "not
+    // one of the built-in backends" to apps that condition on backend identity.
+    wgpu::AdapterInfo {
+        name: "wgpu-remote".to_string(),
+        vendor: 0,
+        device: 0,
+        device_type: wgpu::DeviceType::Other,
+        #[cfg(feature = "wgpu-29")]
+        device_pci_bus_id: String::new(),
+        driver: "wgpu-remote".to_string(),
+        driver_info: env!("CARGO_PKG_VERSION").to_string(),
+        backend: wgpu::Backend::Noop,
+        #[cfg(feature = "wgpu-29")]
+        subgroup_min_size: 0,
+        #[cfg(feature = "wgpu-29")]
+        subgroup_max_size: 0,
+        #[cfg(feature = "wgpu-29")]
+        transient_saves_memory: false,
+    }
+}
+
 impl<C: Connection + Clone + 'static> AdapterInterface for Adapter<C> {
     fn request_device(
         &self,
@@ -216,18 +268,14 @@ impl<C: Connection + Clone + 'static> AdapterInterface for Adapter<C> {
     }
 
     fn get_info(&self) -> wgpu::AdapterInfo {
-        // wgpu 27 has no `Backend::Custom`. Noop is the closest fit —
-        // signals "this isn't one of the built-in backends" to apps that
-        // condition on backend identity.
-        wgpu::AdapterInfo {
-            name: "wgpu-remote".to_string(),
-            vendor: 0,
-            device: 0,
-            device_type: wgpu::DeviceType::Other,
-            driver: "wgpu-remote".to_string(),
-            driver_info: env!("CARGO_PKG_VERSION").to_string(),
-            backend: wgpu::Backend::Noop,
-        }
+        remote_adapter_info()
+    }
+
+    // wgpu 29 added this. We report no cooperative-matrix support (the remote's
+    // real capabilities can be ferried at handshake time in a future revision).
+    #[cfg(feature = "wgpu-29")]
+    fn cooperative_matrix_properties(&self) -> Vec<wgpu::wgt::CooperativeMatrixProperties> {
+        Vec::new()
     }
 
     fn get_texture_format_features(
@@ -392,14 +440,28 @@ impl std::fmt::Debug for BufferMappedRange {
 }
 
 impl wgpu::custom::BufferMappedRangeInterface for BufferMappedRange {
+    // The wire-format readback is a `Bytes` (read-only). Writes through the
+    // mapped range aren't supported yet — that's the write-mapped buffer story.
+    #[cfg(feature = "wgpu-27")]
     fn slice(&self) -> &[u8] {
         &self.bytes
     }
-
+    #[cfg(feature = "wgpu-27")]
     fn slice_mut(&mut self) -> &mut [u8] {
-        // The wire-format readback is a `Bytes` (read-only). Writes
-        // through the mapped range aren't supported yet — that's the
-        // write-mapped buffer story.
+        unimplemented!("BufferMappedRange is read-only in the current build")
+    }
+
+    // wgpu 29 replaced slice/slice_mut with len + (unsafe) read_slice/write_slice.
+    #[cfg(feature = "wgpu-29")]
+    fn len(&self) -> usize {
+        self.bytes.len()
+    }
+    #[cfg(feature = "wgpu-29")]
+    unsafe fn read_slice(&self) -> &[u8] {
+        &self.bytes
+    }
+    #[cfg(feature = "wgpu-29")]
+    unsafe fn write_slice(&mut self) -> wgpu::WriteOnly<'_, [u8]> {
         unimplemented!("BufferMappedRange is read-only in the current build")
     }
 }
@@ -763,12 +825,28 @@ impl<C: Connection + Clone + 'static> DeviceInterface for Device<C> {
         self.error_handler.install(handler);
     }
 
-    fn push_error_scope(&self, _filter: wgpu::ErrorFilter) {
-        // No-op until error scope propagation lands.
+    // No-op until error-scope propagation lands. wgpu 29 hands back a scope
+    // index from push and takes it on pop; we don't track scopes yet.
+    #[cfg(feature = "wgpu-27")]
+    fn push_error_scope(&self, _filter: wgpu::ErrorFilter) {}
+    #[cfg(feature = "wgpu-29")]
+    fn push_error_scope(&self, _filter: wgpu::ErrorFilter) -> u32 {
+        0
     }
 
+    #[cfg(feature = "wgpu-27")]
     fn pop_error_scope(&self) -> std::pin::Pin<Box<dyn PopErrorScopeFuture>> {
         Box::pin(async { None })
+    }
+    #[cfg(feature = "wgpu-29")]
+    fn pop_error_scope(&self, _index: u32) -> std::pin::Pin<Box<dyn PopErrorScopeFuture>> {
+        Box::pin(async { None })
+    }
+
+    // wgpu 29 added `adapter_info` to `DeviceInterface`.
+    #[cfg(feature = "wgpu-29")]
+    fn adapter_info(&self) -> wgpu::AdapterInfo {
+        remote_adapter_info()
     }
 
     unsafe fn start_graphics_debugger_capture(&self) {
@@ -1272,8 +1350,14 @@ impl<C: Connection + Clone + 'static> ComputePassInterface for ComputePass<C> {
         });
     }
 
+    // wgpu 29 renamed compute push-constants to "immediates".
+    #[cfg(feature = "wgpu-27")]
     fn set_push_constants(&mut self, _offset: u32, _data: &[u8]) {
         unimplemented!("compute push constants not yet wired")
+    }
+    #[cfg(feature = "wgpu-29")]
+    fn set_immediates(&mut self, _offset: u32, _data: &[u8]) {
+        unimplemented!("compute immediates not yet wired")
     }
 
     fn insert_debug_marker(&mut self, _label: &str) {}
@@ -1318,6 +1402,9 @@ impl<C: Connection + Clone + 'static> ComputePassInterface for ComputePass<C> {
             });
     }
 
+    // wgpu 29 dropped `end` from the trait (the pass ends via `Drop`, which the
+    // 29 trait now requires); our flush already happens in `Drop`.
+    #[cfg(feature = "wgpu-27")]
     fn end(&mut self) {
         // No-op: pass commands flush back to the parent encoder via Drop.
         // Calling `end()` early is a hint, not a requirement.
@@ -1435,8 +1522,15 @@ impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
         });
     }
 
+    // wgpu 29 renamed render push-constants to "immediates" (and dropped the
+    // per-stage mask — immediates are visible to all stages).
+    #[cfg(feature = "wgpu-27")]
     fn set_push_constants(&mut self, _stages: wgpu::ShaderStages, _offset: u32, _data: &[u8]) {
         unimplemented!("render push constants not yet wired")
+    }
+    #[cfg(feature = "wgpu-29")]
+    fn set_immediates(&mut self, _offset: u32, _data: &[u8]) {
+        unimplemented!("render immediates not yet wired")
     }
 
     fn set_blend_constant(&mut self, _color: wgpu::Color) {
@@ -1624,6 +1718,7 @@ impl<C: Connection + Clone + 'static> RenderPassInterface for RenderPass<C> {
             .report_unsupported("render bundles");
     }
 
+    #[cfg(feature = "wgpu-27")]
     fn end(&mut self) {
         // No-op: see ComputePass::end.
     }

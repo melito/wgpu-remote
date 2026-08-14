@@ -56,7 +56,12 @@ impl Engine {
     /// adapter. Compute + offscreen render only — no surface/swapchain
     /// support in v1.
     pub async fn new() -> Result<Self, EngineError> {
+        // wgpu 29 dropped `InstanceDescriptor::default()` and takes the
+        // descriptor by value.
+        #[cfg(feature = "wgpu-27")]
         let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor::default());
+        #[cfg(feature = "wgpu-29")]
+        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -399,12 +404,22 @@ impl Engine {
             Ok(v) => v,
             Err(e) => return e,
         };
+        // wgpu 29 takes `&[Option<&BindGroupLayout>]` (sparse slots) and an
+        // `immediate_size` instead of push-constant ranges.
+        #[cfg(feature = "wgpu-29")]
+        let bgls_opt: Vec<Option<&wgpu::BindGroupLayout>> = bgls.iter().map(|l| Some(*l)).collect();
         let layout = self
             .device
             .create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: desc.label.as_deref(),
+                #[cfg(feature = "wgpu-27")]
                 bind_group_layouts: &bgls,
+                #[cfg(feature = "wgpu-29")]
+                bind_group_layouts: &bgls_opt,
+                #[cfg(feature = "wgpu-27")]
                 push_constant_ranges: &desc.push_constant_ranges,
+                #[cfg(feature = "wgpu-29")]
+                immediate_size: 0,
             });
         drop(tables);
         self.tables.lock().unwrap().pipeline_layouts.insert(id, layout);
@@ -636,6 +651,10 @@ impl Engine {
                     depth_stencil_attachment: depth_att,
                     timestamp_writes: None,
                     occlusion_query_set: None,
+                    // wgpu 29 moved multiview onto the pass as a view mask;
+                    // `None` = no multiview.
+                    #[cfg(feature = "wgpu-29")]
+                    multiview_mask: None,
                 });
                 for c in commands {
                     self.replay_render_command(tables, &mut pass, c)?;
@@ -751,7 +770,11 @@ impl Engine {
                 Ok(())
             }
             ComputeCommand::SetPushConstants { offset, data } => {
+                // wgpu 29 renamed compute push-constants to immediates.
+                #[cfg(feature = "wgpu-27")]
                 pass.set_push_constants(offset, &data);
+                #[cfg(feature = "wgpu-29")]
+                pass.set_immediates(offset, &data);
                 Ok(())
             }
             ComputeCommand::DispatchWorkgroups { x, y, z } => {
@@ -930,7 +953,12 @@ impl Engine {
                 depth_stencil: desc.depth_stencil,
                 multisample: desc.multisample,
                 fragment,
+                // wgpu 27 has `multiview: Option<NonZeroU32>`; wgpu 29 renamed it
+                // `multiview_mask` (same type). The wire carries `Option<u32>`.
+                #[cfg(feature = "wgpu-27")]
                 multiview: desc.multiview.and_then(std::num::NonZeroU32::new),
+                #[cfg(feature = "wgpu-29")]
+                multiview_mask: desc.multiview.and_then(std::num::NonZeroU32::new),
                 cache: None,
             });
         drop(tables);
